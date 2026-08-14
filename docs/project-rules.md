@@ -90,11 +90,11 @@ These apply to every phase, not just Phase 0.
     `npm run check` (format, lint, typecheck, test) and confirm it's
     green before starting the next phase.
 
-## Binding names (reserved, not yet configured)
+## Binding names
 
-These names are reserved for when the corresponding bindings are actually
-added (see `docs/implementation-plan.md`, Phase 2+). Do not add the
-binding to `wrangler.jsonc` before its phase.
+These names are the canonical binding names. `DB` is configured without a
+remote `database_id` during Phase 2 local development; deployment remains
+blocked until the real ID is supplied.
 
 | Binding | Purpose                                       |
 | ------- | --------------------------------------------- |

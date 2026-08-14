@@ -1,10 +1,9 @@
 # Data Model
 
-Status: **Planning only.** No D1 database, migration, or table exists yet.
-This document defines the tables planned for Phase 2
-(`docs/implementation-plan.md`). SQL migrations are created with
-`wrangler d1 migrations create` once this schema is judged stable enough
-to commit to — see "Migration policy" at the end of this document.
+Status: **Phase 2 local subset implemented.** `migrations/0001_initial.sql`
+creates `allowed_chats`, `processed_updates`, and `speaker_profiles` for
+local development and tests. No remote D1 database exists yet. The other
+tables remain plans for the later phases that own their behavior.
 
 General privacy rule for every table below: **never store message text,
 full OpenAI prompts, or Secrets.** See `docs/security-and-privacy.md` for
@@ -16,15 +15,14 @@ the full allow/deny list.
 in. Anything not listed here is ignored.
 
 - **Planned primary key:** `chat_id` (Telegram chat ID)
-- **May store:** `chat_id`, a human-readable label, `enabled` flag,
-  `created_at`, `updated_at`, the Telegram user ID of the admin who
-  enabled it
+- **Implemented columns:** `chat_id`, optional human-readable `label`,
+  soft `enabled` flag, `created_at`, `updated_at`
 - **Must not store:** chat message content, member lists
 - **Retention:** kept until an admin disables/removes the chat
 - **Index candidates:** primary key lookup only (small table, no
   secondary index expected)
-- **Open questions:** whether disabling is a soft flag (`enabled = 0`) or
-  a row delete; leaning soft-flag for auditability, to confirm in Phase 2
+- **Phase 2 decision:** disabling is a soft flag (`enabled = 0`) so the
+  allowlist entry can be retained and re-enabled explicitly.
 
 ## `speaker_profiles`
 
@@ -37,22 +35,25 @@ used to make translations feel natural for that person.
   for. Profiles are never automatically shared or merged across chats —
   a style/preference learned in one family group has no effect on
   another group, even for the same Telegram user.
-- **May store:** `chat_id`, Telegram `user_id`, display name, primary
-  language, emoji-usage tendency, casual/formal tendency (low-risk
-  stylistic signals only), `created_at`, `updated_at`
+- **Implemented columns:** `chat_id`, Telegram `user_id`, display name,
+  nullable primary language, `created_at`, `updated_at`
+- **Deferred low-risk fields:** emoji usage and casual/formal signals are
+  not added until Phase 4/5 defines the Structured Output and memory
+  behavior that owns them.
 - **Must not store:** any inferred personality, health, political,
   religious, or relationship-status data; conversation content
 - **Retention:** until the user issues `/forgetme` or an admin removes
   them (scoped to the `(chat_id, user_id)` row(s) that command affects)
 - **Index candidates:** primary key lookup on `(chat_id, user_id)`;
   possibly a secondary index on `chat_id` alone for per-chat listing
-- **Open questions:** exact set of auto-derived low-risk features to
-  track initially
-- **Phase 2 note:** the first D1 migration must declare
-  `PRIMARY KEY (chat_id, user_id)` on this table to match the confirmed
-  scope above.
+- **Implemented constraint:** the first migration declares
+  `PRIMARY KEY (chat_id, user_id)` to match the confirmed scope above.
 
 ## `speaker_preferences`
+
+**Implementation status:** deferred to Phase 5/6. Its keys and command
+semantics remain open, so the Phase 2 migration intentionally does not
+freeze a premature schema.
 
 **Purpose:** Explicit, user- or admin-set translation preferences that
 always take priority over auto-derived features from `speaker_profiles`
@@ -72,6 +73,9 @@ ones).
   key/value; how `/remember` vs. `/forget` map to key granularity
 
 ## `translation_corrections`
+
+**Implementation status:** deferred to Phase 5/6, where correction scope,
+conflict resolution, and removal behavior are defined.
 
 **Purpose:** User-submitted correction dictionary from `/correct`, applied
 to future translations (e.g., preferred renderings of names, in-jokes).
@@ -101,10 +105,14 @@ update; this table prevents double-processing.
   Telegram redelivery windows are bounded — exact TTL is an **open
   question** for Phase 2/7
 - **Index candidates:** primary key lookup only
-- **Open questions:** retention window length; cleanup mechanism (D1 has
-  no native TTL — likely a scheduled cleanup job in Phase 7)
+- **Implemented columns:** `update_id` primary key and `processed_at`.
+- **Deferred decision:** retention window and cleanup mechanism belong to
+  Phase 7 reliability work; D1 has no native TTL.
 
 ## `message_mappings`
+
+**Implementation status:** deferred until a later phase establishes a
+concrete edit/correction lookup use case.
 
 **Purpose:** Maps an original Telegram message ID to the bot's translation
 reply message ID, so future features (e.g., edits, corrections tied to a
@@ -124,6 +132,9 @@ its text.
 
 ## `bot_settings`
 
+**Implementation status:** deferred to the command/operations phases;
+the allowlist soft flag covers Phase 2's enable-state requirement.
+
 **Purpose:** Small key/value operational settings not tied to a specific
 chat or user (e.g., global enable/disable switch, schema/version
 markers).
@@ -139,15 +150,14 @@ markers).
 
 ## Migration policy
 
-No `migrations/` directory or `.sql` file exists yet. When this schema is
-finalized enough to implement (Phase 2), migrations will be created with:
+The first migration is `migrations/0001_initial.sql`. Future migrations
+are created with:
 
 ```sh
 npx wrangler d1 migrations create <database-name> <description>
 ```
 
-This creates the `migrations/` directory and a numbered `.sql` file per
-Cloudflare's D1 migration workflow
+This creates a numbered `.sql` file per Cloudflare's D1 migration workflow
 (https://developers.cloudflare.com/d1/reference/migrations/). Migrations
 are applied with `wrangler d1 migrations apply` (`--local` for local dev,
 `--remote` for the deployed database) — not run manually against

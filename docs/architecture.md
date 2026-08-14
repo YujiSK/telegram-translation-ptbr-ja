@@ -1,7 +1,8 @@
 # Architecture
 
-Status: **Foundation only.** Nothing described here as "will" or "future"
-is implemented yet. See `docs/implementation-plan.md` for phasing.
+Status: **Foundation, domain, and local D1 layer implemented.** Telegram,
+OpenAI, webhook orchestration, remote D1, and deployment remain future
+work. See `docs/implementation-plan.md` for phasing.
 
 ## Request flow (target design)
 

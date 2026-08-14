@@ -14,7 +14,14 @@
     "enabled": true,
     "head_sampling_rate": 1,
   },
-  // D1 binding is intentionally not configured yet — see docs/data-model.md
-  // and docs/implementation-plan.md (Phase 2). When added, the binding name
-  // will be "DB", per docs/project-rules.md.
+  // Local D1 works without an account-specific ID on Wrangler 4.45+.
+  // Do not deploy this config until Yuji creates the remote database and
+  // its real database_id is committed here.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "telegram-translation-ptbr-ja",
+      "migrations_dir": "migrations",
+    },
+  ],
 }

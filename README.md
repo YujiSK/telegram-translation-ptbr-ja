@@ -4,15 +4,16 @@ A Telegram bot that translates between Japanese and Brazilian Portuguese
 in a family group chat, aiming to keep tone, emoji, names, and forms of
 address natural in both directions.
 
-## Current status: Foundation and domain layer only — bot not implemented
+## Current status: Local D1 layer implemented — bot not implemented
 
 This repository currently contains project conventions, documentation, a
-minimal Worker scaffold (`GET /health`), CI/test tooling, and a
-vendor-independent domain/config/error layer with a pure Telegram Update
-parser. It does **not** yet talk to Telegram, OpenAI, or a real database.
+minimal Worker scaffold (`GET /health`), CI/test tooling, a
+vendor-independent domain/config/error layer, a pure Telegram Update
+parser, and a locally tested D1 migration/repository layer. It does
+**not** yet talk to Telegram, OpenAI, or a remote database.
 See [`docs/implementation-plan.md`](docs/implementation-plan.md) for the
-full phased plan — **Phase 1 is complete**, and Phase 2 (D1) hasn't
-started.
+full phased plan — **Phase 1 is complete** and Phase 2 is in progress,
+pending creation of the real D1 resource and its `database_id`.
 
 ## Architecture (planned)
 
@@ -78,12 +79,15 @@ telegram-translation-ptbr-ja/
 │   ├── index.ts                                            # minimal Worker: GET /health, 404 otherwise
 │   ├── domain/                                             # vendor-independent types (language, speaker, translation, telegram-update)
 │   ├── config/                                             # non-secret config validation
+│   ├── infrastructure/d1/                                  # parameterized D1 repositories and row validation
 │   ├── infrastructure/telegram/                            # pure Telegram Update parser
 │   └── shared/errors.ts                                    # error hierarchy (validation/config/upstream)
 ├── test/                                                   # mirrors src/, plus health.test.ts for the scaffold
+├── migrations/0001_initial.sql                             # local Phase 2 D1 schema
 ├── .dev.vars.example                                       # empty-valued template for local Secrets
 ├── CLAUDE.md / AGENTS.md                                   # agent instructions (point to docs/project-rules.md)
-└── wrangler.jsonc                                          # Worker config (no bindings/secrets yet)
+├── worker-configuration.d.ts                               # generated binding/runtime types
+└── wrangler.jsonc                                          # Worker config (local DB binding; no Secrets)
 ```
 
 `src/` will grow further into `application/`, `handlers/`, `commands/`,
@@ -114,17 +118,17 @@ npm run dev
 
 ## Available npm scripts
 
-| Script                 | What it does                                                                               |
-| ---------------------- | ------------------------------------------------------------------------------------------ |
-| `npm run dev`          | Run the Worker locally (`wrangler dev`)                                                    |
-| `npm run deploy`       | Deploy the Worker (`wrangler deploy`) — not yet used; no production deploy has happened    |
-| `npm run typecheck`    | `tsc --noEmit`                                                                             |
-| `npm run lint`         | ESLint over the whole repo                                                                 |
-| `npm run format`       | Prettier, writes changes                                                                   |
-| `npm run format:check` | Prettier, check-only (used in CI)                                                          |
-| `npm run test`         | Vitest, running inside the Workers runtime                                                 |
-| `npm run check`        | format:check + lint + typecheck + test — the same thing CI runs                            |
-| `npm run cf-typegen`   | Regenerate `worker-configuration.d.ts` from `wrangler.jsonc` (run after changing bindings) |
+| Script                 | What it does                                                                            |
+| ---------------------- | --------------------------------------------------------------------------------------- |
+| `npm run dev`          | Run the Worker locally (`wrangler dev`)                                                 |
+| `npm run deploy`       | Deploy the Worker (`wrangler deploy`) — not yet used; no production deploy has happened |
+| `npm run typecheck`    | `tsc --noEmit`                                                                          |
+| `npm run lint`         | ESLint over the whole repo                                                              |
+| `npm run format`       | Prettier, writes changes                                                                |
+| `npm run format:check` | Prettier, check-only (used in CI)                                                       |
+| `npm run test`         | Vitest, running inside the Workers runtime                                              |
+| `npm run check`        | format:check + lint + typecheck + test — the same thing CI runs                         |
+| `npm run cf-typegen`   | Regenerate `worker-configuration.d.ts` from `wrangler.jsonc` after binding changes      |
 
 ## Secrets (names only — no values are ever committed)
 
@@ -139,12 +143,12 @@ None of these are registered yet. See
 [`docs/security-and-privacy.md`](docs/security-and-privacy.md) for how
 they'll be managed, and `.dev.vars.example` for the local-dev template.
 
-## Cloudflare D1 binding (planned)
+## Cloudflare D1 binding
 
-Binding name: **`DB`**. Not yet added to `wrangler.jsonc` — see
-[`docs/data-model.md`](docs/data-model.md) for the planned schema and
-[`docs/implementation-plan.md`](docs/implementation-plan.md) Phase 2 for
-when it's introduced.
+Binding name: **`DB`**. It is configured for local development without an
+account-specific ID. Do not deploy until Yuji creates the real D1 database
+and its `database_id` is added. See [`docs/data-model.md`](docs/data-model.md)
+and [`docs/implementation-plan.md`](docs/implementation-plan.md) Phase 2.
 
 ## Testing
 
@@ -154,14 +158,15 @@ npm run test
 
 Tests run inside the actual Workers runtime via
 `@cloudflare/vitest-pool-workers` (not a Node.js simulation of it), so
-Worker-specific behavior is exercised faithfully. `test/health.test.ts`
+Worker-specific and local D1 behavior are exercised faithfully.
+`test/health.test.ts`
 covers the current scaffold: `GET /health` returns 200 with the expected
 JSON body, unmapped paths return 404, and no external network calls occur.
 
 ## Deployment
 
 **Not configured.** This project has never been deployed to Cloudflare,
-no Telegram webhook has been registered, and no D1 database exists yet.
+no Telegram webhook has been registered, and no remote D1 database exists.
 See [`docs/implementation-plan.md`](docs/implementation-plan.md) (Phases
 8–9) and [`docs/operations.md`](docs/operations.md) for the planned path
 there.
