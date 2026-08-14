@@ -1,7 +1,8 @@
 # Architecture
 
-Status: **Foundation, domain, and local D1 layer implemented.** Telegram,
-OpenAI, webhook orchestration, remote D1, and deployment remain future
+Status: **Foundation, domain, and D1 repository layer implemented.** The
+remote D1 resource is provisioned and bound, but its migration has not been
+applied. Telegram, OpenAI, webhook orchestration, and deployment remain future
 work. See `docs/implementation-plan.md` for phasing.
 
 ## Request flow (target design)

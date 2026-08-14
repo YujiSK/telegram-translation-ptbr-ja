@@ -1,9 +1,10 @@
 # Data Model
 
-Status: **Phase 2 local subset implemented.** `migrations/0001_initial.sql`
-creates `allowed_chats`, `processed_updates`, and `speaker_profiles` for
-local development and tests. No remote D1 database exists yet. The other
-tables remain plans for the later phases that own their behavior.
+Status: **Phase 2 schema implemented.** `migrations/0001_initial.sql` creates
+`allowed_chats`, `processed_updates`, and `speaker_profiles` for local
+development and tests. The remote D1 database is provisioned and configured,
+but this migration has not been applied remotely. The other tables remain
+plans for the later phases that own their behavior.
 
 General privacy rule for every table below: **never store message text,
 full OpenAI prompts, or Secrets.** See `docs/security-and-privacy.md` for

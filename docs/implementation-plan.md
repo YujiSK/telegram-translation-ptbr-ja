@@ -1,8 +1,8 @@
 # Implementation Plan
 
-**Current phase: Phase 2 in progress.** The local migration, repository
-layer, and local D1 tests are implemented. Creating the real Cloudflare
-D1 database and wiring its `database_id` remain pending human work.
+**Current phase: Phase 2 completed.** The local migration, repository layer,
+local D1 tests, remote database creation, and real `database_id` wiring are
+complete. The remote migration remains unapplied and Phase 3 has not started.
 
 Rule for every phase (see `docs/project-rules.md` rules 13–14): implement
 one phase at a time, verify with `npm run check` before moving to the
@@ -83,11 +83,11 @@ introduced this status line for the exact diff.
 
 ## Phase 2 — D1
 
-**Status: in progress.** The first local migration contains
+**Status: completed.** The first migration contains
 `allowed_chats`, `processed_updates`, and `speaker_profiles`; the D1
-repositories and Workers-runtime tests are implemented. The production
-D1 resource has not been created, no remote migration has been applied,
-and the real `database_id` is not configured.
+repositories and Workers-runtime tests are implemented. The remote D1 resource
+exists and its real `database_id` is configured. No remote migration has been
+applied and no Worker has been deployed.
 
 - **目的:** Stand up the actual database and the repository layer that
   reads/writes it, per `docs/data-model.md`.
@@ -108,16 +108,13 @@ migrations apply --local`); repository functions have tests using local
 - **テスト:** Vitest tests against local D1 (`applyD1Migrations` in a test
   setup file, per Cloudflare's Vitest+D1 integration pattern) — covering
   allowlist hit/miss, dedupe hit/miss, and profile read/write round-trip.
-- **Yujiによる手動作業:** Create the actual D1 database in the Cloudflare
-  dashboard/CLI (`wrangler d1 create`) — this is a real Cloudflare
-  resource, so it needs explicit human action rather than being created
-  by an agent unattended. Provide the resulting `database_id` for
-  `wrangler.jsonc`.
-- **次フェーズへ進む前の停止点:** Stop once migration + repository layer
-  are implemented, tested locally, and `database_id` is wired in. The
-  first two are complete; stop here until Yuji creates the real D1
-  resource and supplies its non-secret name/ID. Confirm again before
-  starting Telegram integration.
+- **Yujiによる手動作業:** Completed — Yuji created the actual D1 database
+  with Wrangler and supplied its non-secret database name and ID.
+- **次フェーズへ進む前の停止点:** Reached. Migration + repository layer are
+  implemented and tested locally, and the real `database_id` is wired in.
+  Stop here and obtain explicit confirmation before starting Telegram
+  integration. Applying the migration remotely remains a separately approved
+  external operation.
 
 ---
 

@@ -14,13 +14,13 @@
     "enabled": true,
     "head_sampling_rate": 1,
   },
-  // Local D1 works without an account-specific ID on Wrangler 4.45+.
-  // Do not deploy this config until Yuji creates the remote database and
-  // its real database_id is committed here.
+  // The remote database exists, but its migration has not been applied and
+  // the Worker has not been deployed. Local commands still use local D1 by default.
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "telegram-translation-ptbr-ja",
+      "database_id": "1ff63b78-2be0-43e6-8a80-cbf3edbec2a9",
       "migrations_dir": "migrations",
     },
   ],

@@ -8,9 +8,10 @@ D1 for speaker memory. See `README.md` for the full picture.
 
 ## Current phase
 
-**Phase 2 in progress.** Local migration/repositories/tests are complete;
-remote D1 creation and `database_id` wiring are pending. Do not start
-Phase 3. See `docs/implementation-plan.md` for the authoritative status.
+**Phase 2 completed.** The local migration/repositories/tests and remote D1
+binding configuration are complete. The remote migration has not been applied.
+Do not start Phase 3 without an explicit go-ahead. See
+`docs/implementation-plan.md` for the authoritative status.
 
 ## Always read before working
 

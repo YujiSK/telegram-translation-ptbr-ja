@@ -92,9 +92,9 @@ These apply to every phase, not just Phase 0.
 
 ## Binding names
 
-These names are the canonical binding names. `DB` is configured without a
-remote `database_id` during Phase 2 local development; deployment remains
-blocked until the real ID is supplied.
+These names are the canonical binding names. `DB` is configured with the real
+remote `database_id`; local development still uses local D1 by default. Remote
+migrations and deployment require separate explicit approval.
 
 | Binding | Purpose                                       |
 | ------- | --------------------------------------------- |
