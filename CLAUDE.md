@@ -9,8 +9,8 @@ D1 for speaker memory. See `README.md` for the full picture.
 ## Current phase
 
 **Phase 2 completed.** The local migration/repositories/tests and remote D1
-binding configuration are complete. The remote migration has not been applied.
-Do not start Phase 3 without an explicit go-ahead. See
+binding configuration are complete. `0001_initial.sql` has been applied to the
+remote D1 database. Do not start Phase 3 without an explicit go-ahead. See
 `docs/implementation-plan.md` for the authoritative status.
 
 ## Always read before working

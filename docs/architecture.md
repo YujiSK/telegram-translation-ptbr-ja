@@ -1,7 +1,7 @@
 # Architecture
 
 Status: **Foundation, domain, and D1 repository layer implemented.** The
-remote D1 resource is provisioned and bound, but its migration has not been
+remote D1 resource is provisioned and bound, and the initial migration is
 applied. Telegram, OpenAI, webhook orchestration, and deployment remain future
 work. See `docs/implementation-plan.md` for phasing.
 

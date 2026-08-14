@@ -2,7 +2,7 @@
 
 **Current phase: Phase 2 completed.** The local migration, repository layer,
 local D1 tests, remote database creation, and real `database_id` wiring are
-complete. The remote migration remains unapplied and Phase 3 has not started.
+complete. The initial migration is applied remotely and Phase 3 has not started.
 
 Rule for every phase (see `docs/project-rules.md` rules 13–14): implement
 one phase at a time, verify with `npm run check` before moving to the
@@ -86,8 +86,8 @@ introduced this status line for the exact diff.
 **Status: completed.** The first migration contains
 `allowed_chats`, `processed_updates`, and `speaker_profiles`; the D1
 repositories and Workers-runtime tests are implemented. The remote D1 resource
-exists and its real `database_id` is configured. No remote migration has been
-applied and no Worker has been deployed.
+exists, its real `database_id` is configured, and `0001_initial.sql` has been
+applied remotely. No Worker has been deployed.
 
 - **目的:** Stand up the actual database and the repository layer that
   reads/writes it, per `docs/data-model.md`.
@@ -108,13 +108,14 @@ migrations apply --local`); repository functions have tests using local
 - **テスト:** Vitest tests against local D1 (`applyD1Migrations` in a test
   setup file, per Cloudflare's Vitest+D1 integration pattern) — covering
   allowlist hit/miss, dedupe hit/miss, and profile read/write round-trip.
-- **Yujiによる手動作業:** Completed — Yuji created the actual D1 database
-  with Wrangler and supplied its non-secret database name and ID.
+- **Yujiによる手動作業:** Completed — Yuji created the actual D1 database,
+  supplied its non-secret database name and ID, and explicitly applied
+  `0001_initial.sql` remotely with Wrangler.
 - **次フェーズへ進む前の停止点:** Reached. Migration + repository layer are
   implemented and tested locally, and the real `database_id` is wired in.
   Stop here and obtain explicit confirmation before starting Telegram
-  integration. Applying the migration remotely remains a separately approved
-  external operation.
+  integration. The separately approved remote migration was completed on
+  2026-08-14.
 
 ---
 

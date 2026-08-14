@@ -145,8 +145,8 @@ they'll be managed, and `.dev.vars.example` for the local-dev template.
 ## Cloudflare D1 binding
 
 Binding name: **`DB`**. The real database name and ID are configured, while
-local development continues to use local D1 by default. The remote migration
-has not been applied and the Worker has not been deployed. See
+local development continues to use local D1 by default. The initial migration
+has been applied remotely; the Worker has not been deployed. See
 [`docs/data-model.md`](docs/data-model.md) and
 [`docs/implementation-plan.md`](docs/implementation-plan.md) Phase 2.
 
@@ -167,7 +167,7 @@ JSON body, unmapped paths return 404, and no external network calls occur.
 
 **Not performed.** This project has never been deployed to Cloudflare,
 no Telegram webhook has been registered, and the provisioned remote D1
-database does not yet have the project migration applied.
+database contains only the schema created by `0001_initial.sql`.
 See [`docs/implementation-plan.md`](docs/implementation-plan.md) (Phases
 8–9) and [`docs/operations.md`](docs/operations.md) for the planned path
 there.

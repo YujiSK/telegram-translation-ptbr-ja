@@ -14,8 +14,8 @@
     "enabled": true,
     "head_sampling_rate": 1,
   },
-  // The remote database exists, but its migration has not been applied and
-  // the Worker has not been deployed. Local commands still use local D1 by default.
+  // The remote database exists and 0001_initial.sql has been applied.
+  // The Worker has not been deployed. Local commands use local D1 by default.
   "d1_databases": [
     {
       "binding": "DB",
