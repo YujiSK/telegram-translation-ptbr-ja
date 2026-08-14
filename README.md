@@ -4,7 +4,7 @@ A Telegram bot that translates between Japanese and Brazilian Portuguese
 in a family group chat, aiming to keep tone, emoji, names, and forms of
 address natural in both directions.
 
-## Current status: Phase 3 in progress — bot not deployed
+## Current status: Phase 3 complete — bot not deployed
 
 This repository currently contains project conventions, documentation, a
 Worker with `GET /health` and a `POST /telegram/webhook` boundary, CI/test
@@ -14,11 +14,10 @@ mockable Telegram `sendMessage` client. The webhook verifies Telegram's
 Secret header and gates messages through the allowlist/dedupe tables, but
 nothing calls OpenAI and no reply is ever posted yet. No Telegram bot has
 been created, no Secret is registered, the Worker is not deployed, and no
-webhook is registered with Telegram. See
+webhook is registered with Telegram — those four actions belong to
+Phase 8, not Phase 3. See
 [`docs/implementation-plan.md`](docs/implementation-plan.md) for the full
-phased plan — **Phases 0–2 are complete**, Phase 3's local implementation
-is done but the phase isn't `completed` until the external steps above
-happen, and Phase 4 has not started.
+phased plan — **Phases 0–3 are complete** and Phase 4 has not started.
 
 ## Architecture (planned)
 

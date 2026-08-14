@@ -1,13 +1,15 @@
 # Architecture
 
 Status: **Foundation, domain, D1 repository layer, and the Telegram webhook
-boundary are implemented.** `POST /telegram/webhook` verifies the Secret
-header, parses the Update, and gates on the allowlist/dedupe tables — see
-`src/handlers/telegram-webhook.ts`. A mockable `sendMessage` client exists
+boundary are implemented (Phase 3 complete).** `POST /telegram/webhook`
+verifies the Secret header, parses the Update, and gates on the
+allowlist/dedupe tables — see `src/handlers/telegram-webhook.ts`. A
+mockable `sendMessage` client exists
 (`src/infrastructure/telegram/send-message.ts`) but nothing calls it yet: no
-reply is posted, no translation happens. The webhook is not registered with
-Telegram, no Secret is registered, and the Worker is not deployed. See
-`docs/implementation-plan.md` for phasing.
+reply is posted, no translation happens (that's Phase 4). No Telegram bot
+has been created, no Secret is registered, no webhook is registered with
+Telegram, and the Worker is not deployed — those four actions are deferred
+to Phase 8, not Phase 3. See `docs/implementation-plan.md` for phasing.
 
 ## Request flow (target design)
 
@@ -46,10 +48,13 @@ webhook in, `handlers/` dispatches, `application/` orchestrates
 - **Reply context is exactly one message.** If the source message is a
   reply, only the single message it replies to may be used as translation
   context. No broader thread or history is fetched or sent to OpenAI.
-- **Untargeted languages are not translated.** If the detected language is
-  neither Japanese nor Brazilian Portuguese, the bot does not call OpenAI
-  for translation and does not post a reply (see
-  `docs/implementation-plan.md` Phase 4 for exact detection/skip rules).
+- **Untargeted languages are not translated.** For every candidate text
+  message, the bot calls OpenAI exactly once — that single call performs
+  both language detection and translation together (see the point above;
+  there is no separate detection-only call). If the detected language is
+  neither Japanese nor Brazilian Portuguese, no translation reply is
+  posted to Telegram (see `docs/implementation-plan.md` Phase 4 for exact
+  detection/skip rules).
 - **No conversation history is persisted.** D1 stores speaker metadata and
   ID mappings (see `docs/data-model.md`), never message bodies. Reply
   context is read from the live Telegram API at request time, not from
@@ -80,11 +85,16 @@ concrete in code.
   reply).
 - A duplicate Telegram `update_id` is ignored (no duplicate translation
   posted).
-- If OpenAI fails after its limited retry budget, the bot does not post a
-  partial or garbled translation — it fails silently from the group's
-  perspective, and the failure is logged (without message text) for
-  operator visibility. Exact behavior (e.g., an optional low-noise error
-  reply) is decided in Phase 4/7, not here.
+- If OpenAI fails after its limited retry budget (transient errors
+  only — network failure, 429, 5xx), the bot does not post a partial or
+  garbled translation — it fails silently from the group's perspective,
+  and the failure is logged (without message text) for operator
+  visibility. Exact behavior (e.g., an optional low-noise error reply) is
+  decided in Phase 4/7, not here.
+- A malformed or schema-invalid OpenAI response (JSON parse failure, or
+  Structured Output that doesn't match the schema) is a permanent
+  failure and is never retried, per `docs/project-rules.md` rule 7 — the
+  bot never posts an unvalidated or partially-parsed translation.
 - If D1 is unavailable, the request fails safe: no translation is posted
   with stale/guessed speaker settings silently substituted for explicit
   ones.

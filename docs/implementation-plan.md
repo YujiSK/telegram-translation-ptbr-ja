@@ -1,11 +1,13 @@
 # Implementation Plan
 
-**Current phase: Phase 3 in progress.** The local webhook boundary (secret
-verification, parsing, allowlist/dedupe wiring) and the mockable Telegram
-`sendMessage` client are implemented and tested locally. Telegram Bot
-creation, Cloudflare Secret registration, Worker deployment, and Telegram
-webhook registration are all still **pending** — Phase 3 is not marked
-`completed` until those external steps happen. Phase 4 has not started.
+**Current phase: Phase 3 completed; Phase 4 not started.** The local
+webhook boundary (Secret verification, parsing, allowlist/dedupe wiring)
+and the mockable Telegram `sendMessage` client are implemented and
+tested locally, with `npm run check` and CI green — that is Phase 3's
+complete scope. Telegram Bot creation, Cloudflare Secret registration,
+Worker deployment, and Telegram webhook registration are external,
+human-approved actions that belong to **Phase 8**, not to Phase 3's
+completion criteria — see Phase 3 and Phase 8 below.
 
 Rule for every phase (see `docs/project-rules.md` rules 13–14): implement
 one phase at a time, verify with `npm run check` before moving to the
@@ -124,18 +126,18 @@ migrations apply --local`); repository functions have tests using local
 
 ## Phase 3 — Telegram
 
-**Status: local implementation complete; external steps pending.** The
-webhook boundary (`POST /telegram/webhook`), Secret verification,
-allowlist/dedupe wiring, and a mockable `sendMessage` client are
-implemented as `src/handlers/telegram-webhook.ts`,
+**Status: completed.** The webhook boundary (`POST /telegram/webhook`),
+Secret verification, allowlist/dedupe wiring, and a mockable
+`sendMessage` client are implemented as `src/handlers/telegram-webhook.ts`,
 `src/infrastructure/telegram/{webhook-secret,client,send-message}.ts`,
-and `src/env.d.ts`, with tests under the mirrored `test/` paths and
-`npm run check` green. **Not done yet, and required before this phase can
-be marked `completed`:** creating the Telegram bot (BotFather), registering
-`TELEGRAM_WEBHOOK_SECRET`/`TELEGRAM_BOT_TOKEN` as real Cloudflare Secrets,
-deploying the Worker, and registering the Telegram webhook — all four are
-explicit, human-approved, external actions per `CLAUDE.md` and were not
-performed in this change.
+and `src/env.d.ts`, with tests under the mirrored `test/` paths,
+`npm run check` green, and CI green. That is Phase 3's full scope —
+creating the Telegram bot (BotFather), registering
+`TELEGRAM_WEBHOOK_SECRET`/`TELEGRAM_BOT_TOKEN` as real Cloudflare
+Secrets, deploying the Worker, and registering the Telegram webhook are
+**not** part of Phase 3's completion criteria. Those four external,
+human-approved actions belong to Phase 8 (see below) and were correctly
+not performed here.
 
 - **目的:** Receive and validate real Telegram webhook traffic, and be
   able to post a reply — without any translation logic yet.
@@ -173,13 +175,15 @@ performed in this change.
   request per message, producing language detection + translation +
   low-risk style features.
 - **実装内容:** `infrastructure/openai/` Responses API client with
-  Structured Outputs (a single JSON-schema-constrained call); `prompts/`
-  versioned prompt template(s) for JA↔PT-BR translation, tone/emoji/name
-  preservation, and skip-if-untargeted-language behavior; timeout +
-  limited retry (transient errors only, capped attempts, per
-  `docs/project-rules.md` rules 6–8); output validation (reject/retry on
-  a response that doesn't match the expected schema, rather than posting
-  garbage).
+  Structured Outputs (a single JSON-schema-constrained call that performs
+  language detection and translation together — no separate
+  detection-only call); `prompts/` versioned prompt template(s) for
+  JA↔PT-BR translation, tone/emoji/name preservation, and
+  skip-if-untargeted-language behavior; timeout + limited retry (network
+  failure/429/5xx only, capped attempts, per `docs/project-rules.md`
+  rules 6–8); output validation that rejects — and never retries or
+  posts — a response with a JSON parse failure or a schema mismatch,
+  since validation/parsing failures are never retried (rule 7).
 - **前提条件:** Phase 3 complete (so a real message can flow in and a
   reply can flow out once this phase wires them together).
 - **完了条件:** A JA input and a PT-BR input each produce a correctly
@@ -294,30 +298,42 @@ performed in this change.
 
 ## Phase 8 — Deployment preparation
 
-- **目的:** Make the project ready to deploy, without actually deploying
-  to production or registering the live webhook yet (both remain
-  explicit, separate, human-approved actions).
+**This is the phase that owns the four external actions deferred since
+Phase 3:** creating the Telegram bot (BotFather), registering
+`OPENAI_API_KEY`/`TELEGRAM_BOT_TOKEN`/`TELEGRAM_WEBHOOK_SECRET`/
+`SETUP_ADMIN_SECRET` as real Cloudflare Secrets, deploying the Worker,
+and registering the Telegram webhook. None of them happen automatically
+just because Phase 8 starts — each one is still a separate,
+explicit-approval action per `CLAUDE.md`; Phase 8 is where they're
+documented and, once approved individually, performed.
+
+- **目的:** Make the project ready to deploy, and — once each step is
+  separately approved — perform the deferred external setup: bot
+  creation, Secret registration, Worker deployment, and webhook
+  registration.
 - **実装内容:** Finalize Cloudflare Binding configuration in
   `wrangler.jsonc` (D1, and anything else needed); document the exact
   Secret-registration steps (`wrangler secret put` for each of the four
   planned Secrets); document the D1 migration-apply procedure for a real
   (non-local) database; propose (design only, or implement if explicitly
-  approved) a GitHub → Cloudflare auto-deploy workflow; design (not yet
-  register) the webhook-setup endpoint, gated behind
-  `SETUP_ADMIN_SECRET`.
+  approved) a GitHub → Cloudflare auto-deploy workflow; design the
+  webhook-setup step, gated behind `SETUP_ADMIN_SECRET`. Then, only after
+  explicit approval for each individual action: create the Telegram bot,
+  run `wrangler secret put` for each Secret, run `wrangler deploy`, and
+  register the Telegram webhook.
 - **前提条件:** Phase 7 complete.
-- **完了条件:** A documented, reviewed runbook exists for: registering
-  Secrets, applying migrations to the real database, and deploying the
-  Worker; the webhook-setup endpoint design is reviewed; nothing in this
-  phase performs an actual production deploy or webhook registration
-  without explicit separate approval, per `CLAUDE.md`.
+- **完了条件:** A documented, reviewed runbook exists for every step
+  above; the bot exists, all four Secrets are registered, the Worker is
+  deployed, and the webhook is registered — each performed only after
+  its own explicit separate approval, per `CLAUDE.md`.
 - **テスト:** Any new endpoint (e.g., webhook-setup) gets the same
   unit/integration test treatment as prior phases, run against local
-  dev — not production.
-- **Yujiによる手動作業:** Approve and personally trigger (or explicitly
-  authorize an agent to trigger) the first real deploy and Secret
-  registration; these are exactly the "external service changes" that
-  require explicit approval per `CLAUDE.md`.
+  dev before any real deploy.
+- **Yujiによる手動作業:** Approve each external action individually
+  (bot creation, each Secret, the deploy, the webhook registration) —
+  these are exactly the "external service changes" that require
+  explicit approval per `CLAUDE.md`; approving one does not imply
+  approval for the others.
 - **次フェーズへ進む前の停止点:** Stop before any real `wrangler deploy`
   to production, any real `wrangler secret put`, and any real Telegram
   webhook registration — all require Yuji's explicit go-ahead, granted
