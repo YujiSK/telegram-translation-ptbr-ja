@@ -8,13 +8,15 @@ D1 for speaker memory. See `README.md` for the full picture.
 
 ## Current phase
 
-**Phase 3 completed; Phase 4 not started.** The local webhook boundary,
-Secret verification, allowlist/dedupe wiring, and a mockable Telegram
-`sendMessage` client are implemented and tested — that is Phase 3's full
-scope. Telegram bot creation, Secret registration, Worker deployment, and
-webhook registration are Phase 8 actions, not Phase 3 requirements; do not
-perform them without an explicit go-ahead. See
-`docs/implementation-plan.md` for the authoritative status.
+**Phase 4 completed; Phase 5 not started.** The local webhook boundary,
+Secret verification, allowlist/dedupe wiring, OpenAI translation (a single
+Structured Outputs call per message), and the Telegram reply are
+implemented and tested against mocked OpenAI/Telegram responses — no real
+OpenAI API call has been made. Speaker memory (Phase 5) has not started.
+Telegram bot creation, Secret registration, Worker deployment, and
+webhook registration remain Phase 8 actions; do not perform them without
+an explicit go-ahead. See `docs/implementation-plan.md` for the
+authoritative status.
 
 ## Always read before working
 

@@ -1,15 +1,18 @@
 # Architecture
 
-Status: **Foundation, domain, D1 repository layer, and the Telegram webhook
-boundary are implemented (Phase 3 complete).** `POST /telegram/webhook`
-verifies the Secret header, parses the Update, and gates on the
-allowlist/dedupe tables — see `src/handlers/telegram-webhook.ts`. A
-mockable `sendMessage` client exists
-(`src/infrastructure/telegram/send-message.ts`) but nothing calls it yet: no
-reply is posted, no translation happens (that's Phase 4). No Telegram bot
-has been created, no Secret is registered, no webhook is registered with
-Telegram, and the Worker is not deployed — those four actions are deferred
-to Phase 8, not Phase 3. See `docs/implementation-plan.md` for phasing.
+Status: **Foundation, domain, D1 repository layer, the Telegram webhook
+boundary, and OpenAI translation are implemented (Phase 4 complete).**
+`POST /telegram/webhook` verifies the Secret header, parses the Update,
+gates on the allowlist/dedupe tables, calls OpenAI exactly once per
+message via `src/infrastructure/openai/translate.ts`, and — on a
+`translated` outcome — posts the reply via
+`src/infrastructure/telegram/send-message.ts`. See
+`src/handlers/telegram-webhook.ts` and `src/application/translate-and-reply.ts`.
+Every OpenAI/Telegram call in tests is mocked; no real OpenAI API call has
+been made. No Telegram bot has been created, no Secret is registered, no
+webhook is registered with Telegram, and the Worker is not deployed —
+those four actions are deferred to Phase 8. See
+`docs/implementation-plan.md` for phasing.
 
 ## Request flow (target design)
 
@@ -74,30 +77,96 @@ webhook in, `handlers/` dispatches, `application/` orchestrates
 directly in a way that leaks vendor types — see `docs/project-rules.md`
 rule 2.
 
-## Error-time behavior (baseline)
+## Error-time behavior
 
-These are the Phase 0 baseline expectations; later phases will make them
-concrete in code.
-
-- A webhook request that fails Secret verification is rejected before any
-  processing (see `docs/security-and-privacy.md`).
-- A message from a non-allowlisted chat is ignored (no OpenAI call, no
-  reply).
-- A duplicate Telegram `update_id` is ignored (no duplicate translation
-  posted).
+- A webhook request that fails Secret verification is rejected (401)
+  before any body read, JSON parse, or D1 access (see
+  `docs/security-and-privacy.md`).
+- A message from a non-allowlisted chat is ignored (200, no OpenAI call,
+  no reply, no dedupe write).
+- A duplicate Telegram `update_id` is ignored (200 `ignored:duplicate`,
+  no OpenAI/Telegram call).
+- A message longer than `MAX_TRANSLATABLE_MESSAGE_LENGTH` is skipped
+  (200 `ignored:too-long`) before any OpenAI call — the ceiling exists to
+  bound OpenAI cost/latency, not to reject the update.
+- An OpenAI-detected "other" (untargeted) language is a normal, expected
+  outcome (200 `ignored:untargeted-language`), not an error — no Telegram
+  reply is posted.
 - If OpenAI fails after its limited retry budget (transient errors
-  only — network failure, 429, 5xx), the bot does not post a partial or
-  garbled translation — it fails silently from the group's perspective,
-  and the failure is logged (without message text) for operator
-  visibility. Exact behavior (e.g., an optional low-noise error reply) is
-  decided in Phase 4/7, not here.
-- A malformed or schema-invalid OpenAI response (JSON parse failure, or
-  Structured Output that doesn't match the schema) is a permanent
-  failure and is never retried, per `docs/project-rules.md` rule 7 — the
-  bot never posts an unvalidated or partially-parsed translation.
-- If D1 is unavailable, the request fails safe: no translation is posted
-  with stale/guessed speaker settings silently substituted for explicit
-  ones.
+  only — network failure, timeout, 429, 5xx; `DEFAULT_OPENAI_MAX_ATTEMPTS`
+  attempts total, see `src/infrastructure/openai/client.ts`), the webhook
+  responds 500 and the bot never posts a partial or garbled translation.
+  See "Dedupe and retry after a transient failure" below for what happens
+  to the `update_id` in this case.
+- A malformed or schema-invalid OpenAI response (JSON parse failure, a
+  Structured Output that fails the JSON Schema, or one that fails the
+  cross-field logical-consistency check in
+  `src/infrastructure/openai/translate.ts` — e.g. a `targetLanguage` that
+  doesn't match `detectedLanguage`) is a **permanent** failure and is
+  never retried, per `docs/project-rules.md` rule 7. The webhook responds
+  500; the bot never posts an unvalidated or partially-parsed
+  translation. Because it's permanent, the dedupe reservation is kept
+  (not released) — see below — so a Telegram redelivery of the same
+  update does not repeat the same doomed OpenAI call forever. This is the
+  project's anti-infinite-retry design for a permanently malformed
+  response: it fails once, visibly (500, no reply), and then goes quiet
+  on redelivery instead of retrying indefinitely.
+- A Telegram `sendMessage` failure is never treated as success, even when
+  OpenAI's translation already succeeded — the webhook still responds 500. A **permanent** Telegram failure (e.g. chat not found) keeps the
+  dedupe reservation, so a redelivery is a harmless `ignored:duplicate`
+  and OpenAI is not billed a second time for a reply that could never
+  have been delivered anyway. A **transient** Telegram failure (429/5xx)
+  releases the dedupe reservation instead, so a redelivery retries the
+  whole translate-and-reply flow — this accepts a small
+  duplicate-reply risk (if the original `sendMessage` actually succeeded
+  server-side but the success response was lost before the Worker could
+  observe it) in exchange for not silently dropping a message whose
+  translation was never actually delivered. Phase 7 may revisit this
+  trade-off with a stronger idempotency mechanism.
+- If D1 is unavailable, the request fails safe (500): no translation is
+  posted with stale/guessed speaker settings silently substituted for
+  explicit ones.
+- The bot never automatically posts an error-explanation message to the
+  family group for any of the failures above — a failure is visible only
+  as an absent reply plus a 500 response to Telegram (and, once Phase 7
+  adds structured logging, an operator-visible log entry without message
+  text).
+
+## Dedupe and retry after a transient failure
+
+`processed_updates` (see `docs/data-model.md`) records an `update_id`
+**before** the OpenAI/Telegram work runs, so that two concurrent
+deliveries of the same update can't both start processing it. This
+creates a tension: if the OpenAI/Telegram work then fails, a bare "always
+keep the reservation" policy would make Telegram's automatic redelivery
+useless — the redelivery would be classified as a duplicate and dropped,
+even though nothing was ever actually sent.
+
+Phase 4 resolves this with a **reservation-and-release** policy,
+requiring no schema change:
+
+- `recordUpdateIfNew` (unchanged since Phase 2) atomically reserves the
+  `update_id` via `INSERT OR IGNORE`.
+- `releaseProcessedUpdate` (new in Phase 4,
+  `src/infrastructure/d1/processed-updates.ts`) removes that reservation
+  via a parameterized `DELETE ... WHERE update_id = ?1`.
+- The webhook handler calls `releaseProcessedUpdate` **only** when the
+  translate-and-reply flow throws a `TransientUpstreamError` — network
+  failure, timeout, OpenAI 429/5xx after retries are exhausted, or a
+  transient Telegram failure. A `PermanentUpstreamError` (malformed
+  OpenAI response, a permanent Telegram rejection) or a configuration
+  failure never releases the reservation.
+- The release itself is best-effort: if the `DELETE` also fails, the
+  webhook still responds 500 (the request already failed regardless), it
+  just cannot guarantee the redelivery will be retry-able.
+
+Net effect: a transient failure keeps Telegram's redelivery useful (the
+second delivery is processed as if it were the first), while a permanent
+failure bounds retries to exactly one doomed attempt instead of an
+unbounded loop. This is an interim design scoped to Phase 4's existing
+schema; Phase 7 ("Reliability and security") is expected to revisit
+concurrency correctness under real load more rigorously (e.g. a
+reservation TTL/lease instead of a release-on-error signal).
 
 ## What this Worker does _not_ do (see `docs/implementation-plan.md`)
 

@@ -17,14 +17,16 @@ export interface TranslationRequest {
 }
 
 /**
- * Extension point for low-risk style signals (emoji usage, formality,
- * etc.) that Phase 4/5 will populate from the OpenAI Structured Outputs
- * response. Deliberately unspecified beyond a narrow, low-risk key/value
- * bag — see docs/security-and-privacy.md for what may never end up here
- * (no inferred personality/health/political/religious data).
+ * Low-risk style signals extracted by the same OpenAI call that performs
+ * translation (Phase 4) — never stored in D1 until Phase 5 defines the
+ * memory behavior that owns them. Deliberately a small, fixed enum
+ * shape, not free-form: see docs/security-and-privacy.md for what may
+ * never end up here (no inferred personality/health/political/religious
+ * data, no confidence/emotion scores, no age/gender guesses).
  */
 export interface StyleSignals {
-  readonly [signal: string]: string | number | boolean;
+  readonly tone: "casual" | "neutral" | "formal";
+  readonly emojiUsage: "none" | "light" | "frequent";
 }
 
 export type TranslationOutcome =

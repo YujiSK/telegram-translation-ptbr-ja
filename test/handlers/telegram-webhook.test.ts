@@ -1,17 +1,24 @@
 import { env } from "cloudflare:workers";
 import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import worker from "../../src/index";
 
 /**
- * All IDs and text below are obviously synthetic — no real Telegram
- * chat/user ID and no real family message ever appears in this file.
+ * All IDs, Secret-shaped values, and message text below are obviously
+ * synthetic — no real Telegram chat/user ID, no real Secret, and no real
+ * family message ever appears in this file. OpenAI and Telegram are never
+ * reached: every test that exercises the Phase 4 translation path installs
+ * its own `globalThis.fetch` spy (see `mockFetchDispatch`) and restores it
+ * afterward.
  */
 
 const WEBHOOK_SECRET = "synthetic-test-webhook-secret-001";
+const OPENAI_API_KEY = "synthetic-test-openai-key-e2e-001";
+const TELEGRAM_BOT_TOKEN = "0000000000:FAKE-TEST-E2E-TOKEN-not-a-real-secret";
 const CHAT_ID = -1008000000001;
 const USER_ID = 750000001;
+const MESSAGE_ID = 610000001;
 
 interface RawUpdateFixture {
   update_id: number;
@@ -36,7 +43,7 @@ function buildUpdate(
   return {
     update_id: updateId,
     message: {
-      message_id: 610000001,
+      message_id: MESSAGE_ID,
       date: 1700000000,
       chat: { id: chatId, type: "group" },
       from: { id: USER_ID, is_bot: isBot, first_name: "Test User" },
@@ -46,7 +53,13 @@ function buildUpdate(
 }
 
 function testEnv(overrides: Partial<Env> = {}): Env {
-  return { ...env, TELEGRAM_WEBHOOK_SECRET: WEBHOOK_SECRET, ...overrides };
+  return {
+    ...env,
+    TELEGRAM_WEBHOOK_SECRET: WEBHOOK_SECRET,
+    OPENAI_API_KEY,
+    TELEGRAM_BOT_TOKEN,
+    ...overrides,
+  };
 }
 
 function webhookRequest(body: unknown, secretHeader?: string | null): Request {
@@ -68,6 +81,103 @@ async function callWorker(request: Request, envValue: Env): Promise<Response> {
   return response;
 }
 
+async function isUpdateRecorded(updateId: number): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT 1 AS found FROM processed_updates WHERE update_id = ?1")
+    .bind(updateId)
+    .first();
+  return row !== null;
+}
+
+async function allowlistChat(chatId: number = CHAT_ID): Promise<void> {
+  await env.DB.prepare("INSERT INTO allowed_chats (chat_id) VALUES (?1)").bind(chatId).run();
+}
+
+/**
+ * Installs a `globalThis.fetch` spy that routes by host to the OpenAI and
+ * Telegram handlers supplied, and throws for any call to a host or a
+ * service with no handler — so an unexpected extra call (e.g. Telegram
+ * called after a "skip" outcome) fails the test loudly instead of hitting
+ * the real network. Callers must `.mockRestore()` the returned spy.
+ */
+function mockFetchDispatch(handlers: {
+  openai?: (url: string, init: RequestInit) => Response | Promise<Response>;
+  telegram?: (url: string, init: RequestInit) => Response | Promise<Response>;
+}) {
+  return vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url.startsWith("https://api.openai.com/")) {
+        if (!handlers.openai) {
+          throw new Error(`unexpected OpenAI fetch call in test: ${url}`);
+        }
+        return handlers.openai(url, init ?? {});
+      }
+      if (url.startsWith("https://api.telegram.org/")) {
+        if (!handlers.telegram) {
+          throw new Error(`unexpected Telegram fetch call in test: ${url}`);
+        }
+        return handlers.telegram(url, init ?? {});
+      }
+      throw new Error(`unexpected fetch call to an unknown host in test: ${url}`);
+    });
+}
+
+function requireStringBody(body: BodyInit | null | undefined): string {
+  if (typeof body !== "string") {
+    throw new Error("expected a string request body");
+  }
+  return body;
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function openAiStructuredResponse(payload: unknown, status = 200): Response {
+  return jsonResponse(
+    {
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: JSON.stringify(payload) }],
+        },
+      ],
+    },
+    status,
+  );
+}
+
+function openAiTranslatedResponse(): Response {
+  return openAiStructuredResponse({
+    detectedLanguage: "ja",
+    action: "translate",
+    targetLanguage: "pt-br",
+    translatedText: "mensagem sintética de teste",
+    styleSignals: { tone: "casual", emojiUsage: "none" },
+  });
+}
+
+function openAiSkipResponse(): Response {
+  return openAiStructuredResponse({
+    detectedLanguage: "other",
+    action: "skip",
+    targetLanguage: null,
+    translatedText: null,
+    styleSignals: null,
+  });
+}
+
+function telegramSendMessageResponse(messageId = 999999001): Response {
+  return jsonResponse({ ok: true, result: { message_id: messageId, chat: { id: CHAT_ID } } });
+}
+
 beforeEach(async () => {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM processed_updates"),
@@ -75,14 +185,21 @@ beforeEach(async () => {
   ]);
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe("POST /telegram/webhook — secret verification", () => {
   it("accepts a request with the correct secret for an allowlisted chat", async () => {
-    await env.DB.prepare("INSERT INTO allowed_chats (chat_id) VALUES (?1)").bind(CHAT_ID).run();
+    await allowlistChat();
+    mockFetchDispatch({ openai: () => Promise.resolve(openAiSkipResponse()) });
 
     const response = await callWorker(webhookRequest(buildUpdate()), testEnv());
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ outcome: "accepted" });
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "ignored:untargeted-language",
+    });
   });
 
   it("rejects a request missing the secret header", async () => {
@@ -111,7 +228,7 @@ describe("POST /telegram/webhook — secret verification", () => {
   });
 
   it("never touches D1 on an authentication failure", async () => {
-    await env.DB.prepare("INSERT INTO allowed_chats (chat_id) VALUES (?1)").bind(CHAT_ID).run();
+    await allowlistChat();
 
     await callWorker(webhookRequest(buildUpdate(), "wrong-secret"), testEnv());
 
@@ -170,8 +287,9 @@ describe("POST /telegram/webhook — ignored-but-accepted updates", () => {
     await expect(response.json()).resolves.toMatchObject({ outcome: "ignored:not-allowlisted" });
   });
 
-  it("accepts the first valid update and records it for dedupe", async () => {
-    await env.DB.prepare("INSERT INTO allowed_chats (chat_id) VALUES (?1)").bind(CHAT_ID).run();
+  it("records the first valid update for dedupe even when OpenAI reports an untargeted language", async () => {
+    await allowlistChat();
+    mockFetchDispatch({ openai: () => Promise.resolve(openAiSkipResponse()) });
 
     const response = await callWorker(
       webhookRequest(buildUpdate({ updateId: 930000002 })),
@@ -179,22 +297,19 @@ describe("POST /telegram/webhook — ignored-but-accepted updates", () => {
     );
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ outcome: "accepted" });
-
-    const recorded = await env.DB.prepare(
-      "SELECT 1 AS found FROM processed_updates WHERE update_id = ?1",
-    )
-      .bind(930000002)
-      .first();
-    expect(recorded).not.toBeNull();
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "ignored:untargeted-language",
+    });
+    await expect(isUpdateRecorded(930000002)).resolves.toBe(true);
   });
 
   it("treats a redelivered update_id as a duplicate on the second delivery", async () => {
-    await env.DB.prepare("INSERT INTO allowed_chats (chat_id) VALUES (?1)").bind(CHAT_ID).run();
+    await allowlistChat();
+    mockFetchDispatch({ openai: () => Promise.resolve(openAiSkipResponse()) });
 
     const first = await callWorker(webhookRequest(buildUpdate({ updateId: 930000003 })), testEnv());
     expect(first.status).toBe(200);
-    await expect(first.json()).resolves.toMatchObject({ outcome: "accepted" });
+    await expect(first.json()).resolves.toMatchObject({ outcome: "ignored:untargeted-language" });
 
     const second = await callWorker(
       webhookRequest(buildUpdate({ updateId: 930000003 })),
@@ -209,6 +324,7 @@ describe("POST /telegram/webhook — ignored-but-accepted updates", () => {
     await env.DB.prepare("INSERT INTO allowed_chats (chat_id) VALUES (?1)")
       .bind(negativeChatId)
       .run();
+    mockFetchDispatch({ openai: () => Promise.resolve(openAiSkipResponse()) });
 
     const response = await callWorker(
       webhookRequest(buildUpdate({ updateId: 930000004, chatId: negativeChatId })),
@@ -216,7 +332,9 @@ describe("POST /telegram/webhook — ignored-but-accepted updates", () => {
     );
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ outcome: "accepted" });
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "ignored:untargeted-language",
+    });
   });
 });
 
@@ -232,6 +350,215 @@ describe("POST /telegram/webhook — D1 failure handling", () => {
     } finally {
       prepareSpy.mockRestore();
     }
+  });
+});
+
+describe("POST /telegram/webhook — successful translation and reply", () => {
+  it("translates the message and replies via Telegram, returning 200 translated", async () => {
+    await allowlistChat();
+    const telegramHandler = vi.fn((_url: string, _init: RequestInit) =>
+      Promise.resolve(telegramSendMessageResponse()),
+    );
+    mockFetchDispatch({
+      openai: () => Promise.resolve(openAiTranslatedResponse()),
+      telegram: telegramHandler,
+    });
+
+    const response = await callWorker(
+      webhookRequest(buildUpdate({ updateId: 930000010 })),
+      testEnv(),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ outcome: "translated" });
+    expect(telegramHandler).toHaveBeenCalledTimes(1);
+
+    const call = telegramHandler.mock.calls[0];
+    if (call === undefined) {
+      throw new Error("expected the Telegram handler to have been called");
+    }
+    const body: unknown = JSON.parse(requireStringBody(call[1]?.body));
+    expect(body).toMatchObject({
+      chat_id: CHAT_ID,
+      text: "mensagem sintética de teste",
+      reply_parameters: { message_id: MESSAGE_ID },
+    });
+  });
+
+  it("keeps the dedupe reservation after a successful translation", async () => {
+    await allowlistChat();
+    mockFetchDispatch({
+      openai: () => Promise.resolve(openAiTranslatedResponse()),
+      telegram: () => Promise.resolve(telegramSendMessageResponse()),
+    });
+
+    await callWorker(webhookRequest(buildUpdate({ updateId: 930000011 })), testEnv());
+
+    await expect(isUpdateRecorded(930000011)).resolves.toBe(true);
+  });
+});
+
+describe("POST /telegram/webhook — untargeted language", () => {
+  it("never calls Telegram and keeps the dedupe reservation", async () => {
+    await allowlistChat();
+    // No telegram handler: mockFetchDispatch throws if it is ever called.
+    mockFetchDispatch({ openai: () => Promise.resolve(openAiSkipResponse()) });
+
+    const response = await callWorker(
+      webhookRequest(buildUpdate({ updateId: 930000012 })),
+      testEnv(),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "ignored:untargeted-language",
+    });
+    await expect(isUpdateRecorded(930000012)).resolves.toBe(true);
+  });
+});
+
+describe("POST /telegram/webhook — message length ceiling", () => {
+  it("ignores a too-long message without calling OpenAI or Telegram", async () => {
+    await allowlistChat();
+    const fetchSpy = mockFetchDispatch({});
+    const tooLongText = "あ".repeat(2001);
+
+    const response = await callWorker(
+      webhookRequest(buildUpdate({ updateId: 930000013, text: tooLongText })),
+      testEnv(),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ outcome: "ignored:too-long" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    await expect(isUpdateRecorded(930000013)).resolves.toBe(true);
+  });
+});
+
+describe("POST /telegram/webhook — OpenAI transient failure exhausts retries", () => {
+  it("returns 500 and releases the dedupe reservation so a redelivery can be retried", async () => {
+    await allowlistChat();
+    const updateId = 930000014;
+    const failingFetch = mockFetchDispatch({
+      openai: () => Promise.resolve(jsonResponse({ error: { message: "server error" } }, 503)),
+    });
+
+    const first = await callWorker(webhookRequest(buildUpdate({ updateId })), testEnv());
+    expect(first.status).toBe(500);
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(false);
+    failingFetch.mockRestore();
+
+    // A redelivery after the release should be processed as a new update.
+    mockFetchDispatch({
+      openai: () => Promise.resolve(openAiTranslatedResponse()),
+      telegram: () => Promise.resolve(telegramSendMessageResponse()),
+    });
+    const second = await callWorker(webhookRequest(buildUpdate({ updateId })), testEnv());
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({ outcome: "translated" });
+  }, 15000);
+});
+
+describe("POST /telegram/webhook — OpenAI permanent failure keeps the dedupe reservation", () => {
+  it("returns 500 and a redelivery is treated as a harmless duplicate, not retried", async () => {
+    await allowlistChat();
+    const updateId = 930000015;
+    const openaiHandler = vi.fn((_url: string, _init: RequestInit) =>
+      Promise.resolve(jsonResponse({ error: { message: "bad request" } }, 400)),
+    );
+    mockFetchDispatch({ openai: openaiHandler });
+
+    const first = await callWorker(webhookRequest(buildUpdate({ updateId })), testEnv());
+    expect(first.status).toBe(500);
+    expect(openaiHandler).toHaveBeenCalledTimes(1);
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(true);
+
+    const second = await callWorker(webhookRequest(buildUpdate({ updateId })), testEnv());
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({ outcome: "ignored:duplicate" });
+    // The doomed OpenAI call is never repeated for the same reservation.
+    expect(openaiHandler).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("POST /telegram/webhook — malformed OpenAI response", () => {
+  it("returns 500, never calls Telegram, and keeps the dedupe reservation", async () => {
+    await allowlistChat();
+    const updateId = 930000016;
+    // No telegram handler: mockFetchDispatch throws if it is ever called.
+    mockFetchDispatch({
+      openai: () => Promise.resolve(jsonResponse({ output: [] })),
+    });
+
+    const response = await callWorker(webhookRequest(buildUpdate({ updateId })), testEnv());
+
+    expect(response.status).toBe(500);
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(true);
+  });
+});
+
+describe("POST /telegram/webhook — Telegram send failure is never treated as success", () => {
+  it("returns 500 on a permanent Telegram failure and keeps the dedupe reservation", async () => {
+    await allowlistChat();
+    const updateId = 930000017;
+    mockFetchDispatch({
+      openai: () => Promise.resolve(openAiTranslatedResponse()),
+      telegram: () =>
+        Promise.resolve(
+          jsonResponse({ ok: false, error_code: 400, description: "Bad Request: chat not found" }),
+        ),
+    });
+
+    const response = await callWorker(webhookRequest(buildUpdate({ updateId })), testEnv());
+
+    expect(response.status).toBe(500);
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(true);
+  });
+
+  it("returns 500 on a transient Telegram failure and releases the dedupe reservation", async () => {
+    await allowlistChat();
+    const updateId = 930000018;
+    mockFetchDispatch({
+      openai: () => Promise.resolve(openAiTranslatedResponse()),
+      telegram: () => Promise.resolve(jsonResponse({ ok: false, error_code: 503 }, 503)),
+    });
+
+    const response = await callWorker(webhookRequest(buildUpdate({ updateId })), testEnv());
+
+    expect(response.status).toBe(500);
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(false);
+  }, 15000);
+});
+
+describe("POST /telegram/webhook — missing Secrets", () => {
+  it("returns 500 without calling OpenAI or Telegram when OPENAI_API_KEY is missing", async () => {
+    await allowlistChat();
+    const fetchSpy = mockFetchDispatch({});
+    const updateId = 930000019;
+
+    const response = await callWorker(
+      webhookRequest(buildUpdate({ updateId })),
+      testEnv({ OPENAI_API_KEY: "" }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(true);
+  });
+
+  it("returns 500 without calling OpenAI or Telegram when TELEGRAM_BOT_TOKEN is missing", async () => {
+    await allowlistChat();
+    const fetchSpy = mockFetchDispatch({});
+    const updateId = 930000020;
+
+    const response = await callWorker(
+      webhookRequest(buildUpdate({ updateId })),
+      testEnv({ TELEGRAM_BOT_TOKEN: "" }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(true);
   });
 });
 

@@ -38,9 +38,11 @@ used to make translations feel natural for that person.
   another group, even for the same Telegram user.
 - **Implemented columns:** `chat_id`, Telegram `user_id`, display name,
   nullable primary language, `created_at`, `updated_at`
-- **Deferred low-risk fields:** emoji usage and casual/formal signals are
-  not added until Phase 4/5 defines the Structured Output and memory
-  behavior that owns them.
+- **Deferred low-risk fields:** emoji usage and casual/formal signals.
+  Phase 4 defines their shape (`StyleSignals` — `tone`, `emojiUsage`,
+  produced by the same OpenAI call as the translation) but does not
+  persist them anywhere; no column for them exists until Phase 5 defines
+  the memory read/write behavior that owns them.
 - **Must not store:** any inferred personality, health, political,
   religious, or relationship-status data; conversation content
 - **Retention:** until the user issues `/forgetme` or an admin removes

@@ -1,13 +1,13 @@
 # Implementation Plan
 
-**Current phase: Phase 3 completed; Phase 4 not started.** The local
-webhook boundary (Secret verification, parsing, allowlist/dedupe wiring)
-and the mockable Telegram `sendMessage` client are implemented and
-tested locally, with `npm run check` and CI green — that is Phase 3's
-complete scope. Telegram Bot creation, Cloudflare Secret registration,
-Worker deployment, and Telegram webhook registration are external,
-human-approved actions that belong to **Phase 8**, not to Phase 3's
-completion criteria — see Phase 3 and Phase 8 below.
+**Current phase: Phase 4 completed; Phase 5 not started.** OpenAI
+translation local implementation: Completed. Structured Outputs mock
+tests: Completed. Telegram reply orchestration mock tests: Completed.
+Speaker memory: Not started. Real OpenAI API test: Not performed (all
+Phase 4 tests use a mocked OpenAI HTTP response, per design). Telegram
+Bot creation, Cloudflare Secret registration, Worker deployment, and
+Telegram webhook registration: Pending until Phase 8 — see Phase 3,
+Phase 4, and Phase 8 below.
 
 Rule for every phase (see `docs/project-rules.md` rules 13–14): implement
 one phase at a time, verify with `npm run check` before moving to the
@@ -170,6 +170,26 @@ not performed here.
 ---
 
 ## Phase 4 — OpenAI translation
+
+**Status: completed.** OpenAI translation local implementation:
+Completed. Structured Outputs mock tests: Completed. Telegram reply
+orchestration mock tests: Completed. Implemented as
+`src/prompts/translation-v1.ts` (versioned prompt + strict Structured
+Outputs JSON Schema), `src/infrastructure/openai/{client,translate}.ts`
+(Responses API call with timeout + capped transient-only retry, response
+validation, and domain conversion), `src/application/translate-and-reply.ts`
+(the translate-then-reply use case), the webhook integration in
+`src/handlers/telegram-webhook.ts` (length check, Secret-presence check,
+and the dedupe-reservation-release policy for transient failures — see
+`docs/architecture.md`, "Dedupe and retry after a transient failure"),
+and the non-secret `ENVIRONMENT`/`OPENAI_MODEL`/
+`MAX_TRANSLATABLE_MESSAGE_LENGTH` vars in `wrangler.jsonc`, with tests
+under the mirrored `test/` paths, `npm run check` green, and CI green.
+Real OpenAI API test: Not performed — every test uses a mocked OpenAI
+HTTP response, by design (no live OpenAI spend in CI or in this local
+implementation work). Speaker memory: Not started (Phase 5). Telegram
+Bot creation, Secret registration, Worker deployment, and Telegram
+webhook registration remain Pending until Phase 8, unchanged from Phase 3.
 
 - **目的:** Implement the actual translation capability: one OpenAI
   request per message, producing language detection + translation +

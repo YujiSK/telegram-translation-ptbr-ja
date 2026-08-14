@@ -4,20 +4,24 @@ A Telegram bot that translates between Japanese and Brazilian Portuguese
 in a family group chat, aiming to keep tone, emoji, names, and forms of
 address natural in both directions.
 
-## Current status: Phase 3 complete — bot not deployed
+## Current status: Phase 4 complete — bot not deployed
 
 This repository currently contains project conventions, documentation, a
 Worker with `GET /health` and a `POST /telegram/webhook` boundary, CI/test
 tooling, a vendor-independent domain/config/error layer, a pure Telegram
-Update parser, a locally tested D1 migration/repository layer, and a
-mockable Telegram `sendMessage` client. The webhook verifies Telegram's
-Secret header and gates messages through the allowlist/dedupe tables, but
-nothing calls OpenAI and no reply is ever posted yet. No Telegram bot has
+Update parser, a locally tested D1 migration/repository layer, a
+mockable Telegram `sendMessage` client, and a full OpenAI translation
+pipeline (versioned prompt, Structured Outputs client, timeout + capped
+transient-only retry, and the translate-and-reply application use case).
+The webhook verifies Telegram's Secret header, gates messages through the
+allowlist/dedupe tables, calls OpenAI exactly once per message, and posts
+the translated reply — all tested against mocked OpenAI/Telegram HTTP
+responses; no real OpenAI API call has been made. No Telegram bot has
 been created, no Secret is registered, the Worker is not deployed, and no
 webhook is registered with Telegram — those four actions belong to
-Phase 8, not Phase 3. See
-[`docs/implementation-plan.md`](docs/implementation-plan.md) for the full
-phased plan — **Phases 0–3 are complete** and Phase 4 has not started.
+Phase 8. See [`docs/implementation-plan.md`](docs/implementation-plan.md)
+for the full phased plan — **Phases 0–4 are complete** and Phase 5
+(speaker memory) has not started.
 
 ## Architecture (planned)
 
@@ -84,8 +88,11 @@ telegram-translation-ptbr-ja/
 │   ├── env.d.ts                                             # Secret binding types (merged into the generated Env)
 │   ├── domain/                                             # vendor-independent types (language, speaker, translation, telegram-update)
 │   ├── config/                                             # non-secret config validation
+│   ├── prompts/                                            # versioned OpenAI prompt + Structured Outputs schema
+│   ├── application/                                        # translate-and-reply use case (boundary interfaces only)
 │   ├── handlers/                                           # HTTP/webhook entry points
 │   ├── infrastructure/d1/                                  # parameterized D1 repositories and row validation
+│   ├── infrastructure/openai/                              # Responses API client, response validation, domain conversion
 │   ├── infrastructure/telegram/                            # Update parser, webhook Secret check, sendMessage client
 │   └── shared/errors.ts                                    # error hierarchy (validation/config/upstream)
 ├── test/                                                   # mirrors src/, plus health.test.ts for the scaffold
@@ -96,8 +103,8 @@ telegram-translation-ptbr-ja/
 └── wrangler.jsonc                                          # Worker config (remote DB binding; no Secrets)
 ```
 
-`src/` will grow further into `application/`, `commands/`, and `prompts/`
-as described in [`docs/project-rules.md`](docs/project-rules.md).
+`src/` will grow further into `commands/` (Phase 6) as described in
+[`docs/project-rules.md`](docs/project-rules.md).
 
 ## Getting started in GitHub Codespaces
 
@@ -145,12 +152,13 @@ SETUP_ADMIN_SECRET
 ```
 
 None of these are registered as real Cloudflare Secrets yet.
-`TELEGRAM_WEBHOOK_SECRET` and `TELEGRAM_BOT_TOKEN` are read by the Phase 3
-webhook boundary and Telegram client when present, but the code treats
-them as optional and fails safely (rejecting requests) when they're
-absent — see [`docs/security-and-privacy.md`](docs/security-and-privacy.md)
-for how they'll eventually be managed, and `.dev.vars.example` for the
-local-dev template.
+`TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_BOT_TOKEN`, and `OPENAI_API_KEY` are
+read by the webhook boundary, Telegram client, and OpenAI client when
+present, but the code treats them as optional and fails safely (rejecting
+requests) when they're absent — see
+[`docs/security-and-privacy.md`](docs/security-and-privacy.md) for how
+they'll eventually be managed, and `.dev.vars.example` for the local-dev
+template.
 
 ## Cloudflare D1 binding
 
@@ -171,11 +179,16 @@ Tests run inside the actual Workers runtime via
 Worker-specific and local D1 behavior are exercised faithfully. Coverage
 includes `test/health.test.ts` (the health/404 scaffold),
 `test/handlers/telegram-webhook.test.ts` (Secret verification, parsing,
-allowlist/dedupe gating against local D1), and
-`test/infrastructure/telegram/{webhook-secret,send-message}.test.ts` (Secret
-comparison and the `sendMessage` client's error classification). No test
-calls the real Telegram, OpenAI, or remote D1 — outbound `fetch` is always
-a supplied mock.
+allowlist/dedupe gating, the full translate-and-reply flow, and the
+dedupe-release policy on transient vs. permanent failures, all against
+local D1), `test/infrastructure/telegram/{webhook-secret,send-message}.test.ts`
+(Secret comparison and the `sendMessage` client's error classification),
+`test/infrastructure/openai/{client,translate}.test.ts` (Structured
+Outputs request/response handling, retry/timeout behavior, and malformed-
+response rejection), `test/prompts/translation-v1.test.ts` (prompt shape
+and schema), and `test/application/translate-and-reply.test.ts` (the use
+case in isolation). No test calls the real Telegram, OpenAI, or remote
+D1 — outbound `fetch` is always a supplied mock.
 
 ## Deployment
 

@@ -5,6 +5,7 @@ import { isChatAllowed } from "../../../src/infrastructure/d1/allowed-chats";
 import {
   hasProcessedUpdate,
   recordUpdateIfNew,
+  releaseProcessedUpdate,
 } from "../../../src/infrastructure/d1/processed-updates";
 import {
   getSpeakerProfile,
@@ -79,6 +80,38 @@ describe("processed updates repository", () => {
     await expect(
       env.DB.prepare("INSERT INTO processed_updates (update_id) VALUES (?1)").bind(910000003).run(),
     ).rejects.toThrow();
+  });
+});
+
+describe("releaseProcessedUpdate — dedupe reservation release", () => {
+  it("removes a reservation and returns true so a redelivery can be reprocessed", async () => {
+    await expect(recordUpdateIfNew(env.DB, 910000004)).resolves.toBe(true);
+
+    await expect(releaseProcessedUpdate(env.DB, 910000004)).resolves.toBe(true);
+
+    await expect(hasProcessedUpdate(env.DB, 910000004)).resolves.toBe(false);
+    await expect(recordUpdateIfNew(env.DB, 910000004)).resolves.toBe(true);
+  });
+
+  it("returns false without erroring when releasing an update that was never recorded", async () => {
+    await expect(releaseProcessedUpdate(env.DB, 910000005)).resolves.toBe(false);
+  });
+
+  it("returns false (not an error) when releasing the same reservation twice", async () => {
+    await recordUpdateIfNew(env.DB, 910000006);
+
+    await expect(releaseProcessedUpdate(env.DB, 910000006)).resolves.toBe(true);
+    await expect(releaseProcessedUpdate(env.DB, 910000006)).resolves.toBe(false);
+  });
+
+  it("only releases the targeted update_id, leaving other reservations intact", async () => {
+    await recordUpdateIfNew(env.DB, 910000007);
+    await recordUpdateIfNew(env.DB, 910000008);
+
+    await releaseProcessedUpdate(env.DB, 910000007);
+
+    await expect(hasProcessedUpdate(env.DB, 910000007)).resolves.toBe(false);
+    await expect(hasProcessedUpdate(env.DB, 910000008)).resolves.toBe(true);
   });
 });
 
