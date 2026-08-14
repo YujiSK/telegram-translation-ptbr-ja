@@ -1,6 +1,7 @@
 # Implementation Plan
 
-**Current phase: Phase 0 (Foundation).**
+**Current phase: Phase 1 completed; waiting for explicit approval before
+Phase 2.**
 
 Rule for every phase (see `docs/project-rules.md` rules 13–14): implement
 one phase at a time, verify with `npm run check` before moving to the
@@ -15,7 +16,7 @@ before the next phase.
 
 ## Phase 0 — Foundation
 
-**Status: in progress (this is the phase being completed now).**
+**Status: completed.**
 
 - **目的 (Purpose):** Stand up project conventions, documentation, tooling,
   and a minimal deployable-shape Worker, with nothing product-specific
@@ -46,6 +47,12 @@ check` passes; no Secrets present anywhere in the repo; CI config
 ---
 
 ## Phase 1 — Domain and configuration
+
+**Status: completed.** Implemented as `src/domain/{language,speaker,translation,telegram-update}.ts`,
+`src/shared/errors.ts`, `src/config/app-config.ts`, and
+`src/infrastructure/telegram/parse-update.ts`, with tests under the
+mirrored `test/` paths. `npm run check` is green; see the commit that
+introduced this status line for the exact diff.
 
 - **目的:** Establish the vendor-independent type vocabulary and
   configuration validation the rest of the app will build on.

@@ -8,8 +8,9 @@ D1 for speaker memory. See `README.md` for the full picture.
 
 ## Current phase
 
-**Phase 0 (Foundation).** See `docs/implementation-plan.md` for the phase
-list and what "current phase" means for how much to build in one change.
+**Phase 1 completed; waiting for explicit approval before Phase 2.** See
+`docs/implementation-plan.md` for the phase list and what "current phase"
+means for how much to build in one change.
 
 ## Always read before working
 

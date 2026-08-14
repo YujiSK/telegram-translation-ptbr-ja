@@ -4,13 +4,15 @@ A Telegram bot that translates between Japanese and Brazilian Portuguese
 in a family group chat, aiming to keep tone, emoji, names, and forms of
 address natural in both directions.
 
-## Current status: Foundation only — bot not implemented
+## Current status: Foundation and domain layer only — bot not implemented
 
 This repository currently contains project conventions, documentation, a
-minimal Worker scaffold (`GET /health`), and CI/test tooling. It does
-**not** yet talk to Telegram, OpenAI, or a real database. See
-[`docs/implementation-plan.md`](docs/implementation-plan.md) for the full
-phased plan — we're at **Phase 0**.
+minimal Worker scaffold (`GET /health`), CI/test tooling, and a
+vendor-independent domain/config/error layer with a pure Telegram Update
+parser. It does **not** yet talk to Telegram, OpenAI, or a real database.
+See [`docs/implementation-plan.md`](docs/implementation-plan.md) for the
+full phased plan — **Phase 1 is complete**, and Phase 2 (D1) hasn't
+started.
 
 ## Architecture (planned)
 
@@ -72,16 +74,21 @@ telegram-translation-ptbr-ja/
 ├── .claude/skills/telegram-translation-project/SKILL.md   # Claude Code skill for this repo
 ├── .github/workflows/ci.yml                               # format/lint/typecheck/test on push & PR
 ├── docs/                                                   # architecture, data model, security, ops, plan, ADRs
-├── src/index.ts                                            # minimal Worker: GET /health, 404 otherwise
-├── test/health.test.ts                                     # Workers-runtime tests for the scaffold
+├── src/
+│   ├── index.ts                                            # minimal Worker: GET /health, 404 otherwise
+│   ├── domain/                                             # vendor-independent types (language, speaker, translation, telegram-update)
+│   ├── config/                                             # non-secret config validation
+│   ├── infrastructure/telegram/                            # pure Telegram Update parser
+│   └── shared/errors.ts                                    # error hierarchy (validation/config/upstream)
+├── test/                                                   # mirrors src/, plus health.test.ts for the scaffold
 ├── .dev.vars.example                                       # empty-valued template for local Secrets
 ├── CLAUDE.md / AGENTS.md                                   # agent instructions (point to docs/project-rules.md)
 └── wrangler.jsonc                                          # Worker config (no bindings/secrets yet)
 ```
 
-`src/` will grow into `domain/`, `application/`, `infrastructure/`,
-`handlers/`, `commands/`, `prompts/`, `shared/`, and `config/` as
-described in [`docs/project-rules.md`](docs/project-rules.md).
+`src/` will grow further into `application/`, `handlers/`, `commands/`,
+and `prompts/` as described in
+[`docs/project-rules.md`](docs/project-rules.md).
 
 ## Getting started in GitHub Codespaces
 

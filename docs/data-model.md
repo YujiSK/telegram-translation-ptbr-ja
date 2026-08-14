@@ -31,20 +31,26 @@ in. Anything not listed here is ignored.
 **Purpose:** Per-user identity and low-risk linguistic characteristics
 used to make translations feel natural for that person.
 
-- **Planned primary key:** `(chat_id, user_id)` composite, or `user_id`
-  alone if profiles are meant to follow a person across chats — **open
-  question, see below**
-- **May store:** Telegram `user_id`, display name, primary language,
-  emoji-usage tendency, casual/formal tendency (low-risk stylistic
-  signals only), `created_at`, `updated_at`
+- **Planned primary key:** `(chat_id, user_id)` composite — **confirmed**.
+  A speaker's profile is scoped to a single Telegram group: the same
+  person gets a separate profile row in each group the bot is enabled
+  for. Profiles are never automatically shared or merged across chats —
+  a style/preference learned in one family group has no effect on
+  another group, even for the same Telegram user.
+- **May store:** `chat_id`, Telegram `user_id`, display name, primary
+  language, emoji-usage tendency, casual/formal tendency (low-risk
+  stylistic signals only), `created_at`, `updated_at`
 - **Must not store:** any inferred personality, health, political,
   religious, or relationship-status data; conversation content
 - **Retention:** until the user issues `/forgetme` or an admin removes
-  them
-- **Index candidates:** primary key lookup; possibly an index on
-  `chat_id` if profiles are queried per-chat
-- **Open questions:** profile scope (per-chat vs. global per-user);
-  exact set of auto-derived low-risk features to track initially
+  them (scoped to the `(chat_id, user_id)` row(s) that command affects)
+- **Index candidates:** primary key lookup on `(chat_id, user_id)`;
+  possibly a secondary index on `chat_id` alone for per-chat listing
+- **Open questions:** exact set of auto-derived low-risk features to
+  track initially
+- **Phase 2 note:** the first D1 migration must declare
+  `PRIMARY KEY (chat_id, user_id)` on this table to match the confirmed
+  scope above.
 
 ## `speaker_preferences`
 

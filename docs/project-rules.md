@@ -113,3 +113,23 @@ binding to `wrangler.jsonc` before its phase.
 that first needs a Node.js built-in (for example, if the OpenAI or
 Telegram HTTP client ends up requiring one), and note why in this file
 when it happens. Don't add compatibility flags speculatively.
+
+## Git workflow
+
+This repository develops directly on `main` — no per-phase branches, no
+Pull Requests, for the foreseeable future (revisit this if the project
+ever gains multiple concurrent contributors).
+
+- Work directly on `main`. Do not create a Phase/feature branch and do
+  not open a Pull Request.
+- Before starting work: check `git status` for uncommitted changes (stop
+  and report instead of overwriting anything found), switch to `main`,
+  `git pull --ff-only origin main`, `npm ci`, and confirm `npm run check`
+  passes on the unmodified tree.
+- Commit only after `npm run check` passes on the finished change (see
+  rule 14 above — this workflow is how that verification reaches `main`).
+- Push with `git push origin main`. Never force-push.
+- If `main` can't be pushed to directly because of a repository
+  protection rule or other infrastructure constraint, stop before
+  implementing and report the constraint — don't silently fall back to a
+  branch or a PR.
