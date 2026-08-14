@@ -9,7 +9,7 @@ describe("GET /health", () => {
     const request = new Request("https://example.com/health");
     const ctx = createExecutionContext();
 
-    const response = worker.fetch(request, env, ctx);
+    const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
 
     expect(response.status).toBe(200);
@@ -26,7 +26,7 @@ describe("unknown routes", () => {
     const request = new Request("https://example.com/does-not-exist");
     const ctx = createExecutionContext();
 
-    const response = worker.fetch(request, env, ctx);
+    const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
 
     expect(response.status).toBe(404);
@@ -39,7 +39,7 @@ describe("unknown routes", () => {
     const request = new Request("https://example.com/health", { method: "POST" });
     const ctx = createExecutionContext();
 
-    const response = worker.fetch(request, env, ctx);
+    const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
 
     expect(response.status).toBe(404);

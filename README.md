@@ -4,15 +4,21 @@ A Telegram bot that translates between Japanese and Brazilian Portuguese
 in a family group chat, aiming to keep tone, emoji, names, and forms of
 address natural in both directions.
 
-## Current status: Phase 2 complete — bot not implemented
+## Current status: Phase 3 in progress — bot not deployed
 
 This repository currently contains project conventions, documentation, a
-minimal Worker scaffold (`GET /health`), CI/test tooling, a
-vendor-independent domain/config/error layer, a pure Telegram Update
-parser, and a locally tested D1 migration/repository layer. It does
-**not** yet talk to Telegram, OpenAI, or the provisioned remote database.
-See [`docs/implementation-plan.md`](docs/implementation-plan.md) for the
-full phased plan — **Phases 0–2 are complete** and Phase 3 has not started.
+Worker with `GET /health` and a `POST /telegram/webhook` boundary, CI/test
+tooling, a vendor-independent domain/config/error layer, a pure Telegram
+Update parser, a locally tested D1 migration/repository layer, and a
+mockable Telegram `sendMessage` client. The webhook verifies Telegram's
+Secret header and gates messages through the allowlist/dedupe tables, but
+nothing calls OpenAI and no reply is ever posted yet. No Telegram bot has
+been created, no Secret is registered, the Worker is not deployed, and no
+webhook is registered with Telegram. See
+[`docs/implementation-plan.md`](docs/implementation-plan.md) for the full
+phased plan — **Phases 0–2 are complete**, Phase 3's local implementation
+is done but the phase isn't `completed` until the external steps above
+happen, and Phase 4 has not started.
 
 ## Architecture (planned)
 
@@ -75,23 +81,24 @@ telegram-translation-ptbr-ja/
 ├── .github/workflows/ci.yml                               # format/lint/typecheck/test on push & PR
 ├── docs/                                                   # architecture, data model, security, ops, plan, ADRs
 ├── src/
-│   ├── index.ts                                            # minimal Worker: GET /health, 404 otherwise
+│   ├── index.ts                                            # Worker: GET /health, POST /telegram/webhook, 404 otherwise
+│   ├── env.d.ts                                             # Secret binding types (merged into the generated Env)
 │   ├── domain/                                             # vendor-independent types (language, speaker, translation, telegram-update)
 │   ├── config/                                             # non-secret config validation
+│   ├── handlers/                                           # HTTP/webhook entry points
 │   ├── infrastructure/d1/                                  # parameterized D1 repositories and row validation
-│   ├── infrastructure/telegram/                            # pure Telegram Update parser
+│   ├── infrastructure/telegram/                            # Update parser, webhook Secret check, sendMessage client
 │   └── shared/errors.ts                                    # error hierarchy (validation/config/upstream)
 ├── test/                                                   # mirrors src/, plus health.test.ts for the scaffold
-├── migrations/0001_initial.sql                             # local Phase 2 D1 schema
+├── migrations/0001_initial.sql                             # local Phase 2 D1 schema (applied remotely)
 ├── .dev.vars.example                                       # empty-valued template for local Secrets
 ├── CLAUDE.md / AGENTS.md                                   # agent instructions (point to docs/project-rules.md)
 ├── worker-configuration.d.ts                               # generated binding/runtime types
-└── wrangler.jsonc                                          # Worker config (local DB binding; no Secrets)
+└── wrangler.jsonc                                          # Worker config (remote DB binding; no Secrets)
 ```
 
-`src/` will grow further into `application/`, `handlers/`, `commands/`,
-and `prompts/` as described in
-[`docs/project-rules.md`](docs/project-rules.md).
+`src/` will grow further into `application/`, `commands/`, and `prompts/`
+as described in [`docs/project-rules.md`](docs/project-rules.md).
 
 ## Getting started in GitHub Codespaces
 
@@ -138,9 +145,13 @@ TELEGRAM_WEBHOOK_SECRET
 SETUP_ADMIN_SECRET
 ```
 
-None of these are registered yet. See
-[`docs/security-and-privacy.md`](docs/security-and-privacy.md) for how
-they'll be managed, and `.dev.vars.example` for the local-dev template.
+None of these are registered as real Cloudflare Secrets yet.
+`TELEGRAM_WEBHOOK_SECRET` and `TELEGRAM_BOT_TOKEN` are read by the Phase 3
+webhook boundary and Telegram client when present, but the code treats
+them as optional and fails safely (rejecting requests) when they're
+absent — see [`docs/security-and-privacy.md`](docs/security-and-privacy.md)
+for how they'll eventually be managed, and `.dev.vars.example` for the
+local-dev template.
 
 ## Cloudflare D1 binding
 
@@ -158,10 +169,14 @@ npm run test
 
 Tests run inside the actual Workers runtime via
 `@cloudflare/vitest-pool-workers` (not a Node.js simulation of it), so
-Worker-specific and local D1 behavior are exercised faithfully.
-`test/health.test.ts`
-covers the current scaffold: `GET /health` returns 200 with the expected
-JSON body, unmapped paths return 404, and no external network calls occur.
+Worker-specific and local D1 behavior are exercised faithfully. Coverage
+includes `test/health.test.ts` (the health/404 scaffold),
+`test/handlers/telegram-webhook.test.ts` (Secret verification, parsing,
+allowlist/dedupe gating against local D1), and
+`test/infrastructure/telegram/{webhook-secret,send-message}.test.ts` (Secret
+comparison and the `sendMessage` client's error classification). No test
+calls the real Telegram, OpenAI, or remote D1 — outbound `fetch` is always
+a supplied mock.
 
 ## Deployment
 

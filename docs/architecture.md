@@ -1,9 +1,13 @@
 # Architecture
 
-Status: **Foundation, domain, and D1 repository layer implemented.** The
-remote D1 resource is provisioned and bound, and the initial migration is
-applied. Telegram, OpenAI, webhook orchestration, and deployment remain future
-work. See `docs/implementation-plan.md` for phasing.
+Status: **Foundation, domain, D1 repository layer, and the Telegram webhook
+boundary are implemented.** `POST /telegram/webhook` verifies the Secret
+header, parses the Update, and gates on the allowlist/dedupe tables — see
+`src/handlers/telegram-webhook.ts`. A mockable `sendMessage` client exists
+(`src/infrastructure/telegram/send-message.ts`) but nothing calls it yet: no
+reply is posted, no translation happens. The webhook is not registered with
+Telegram, no Secret is registered, and the Worker is not deployed. See
+`docs/implementation-plan.md` for phasing.
 
 ## Request flow (target design)
 

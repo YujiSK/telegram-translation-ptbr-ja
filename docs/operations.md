@@ -19,15 +19,19 @@ possible yet.
 | Telegram BotFather                                     | Create the bot, obtain its token, set bot metadata                                                   |
 | OpenAI Platform                                        | API key management, usage/cost monitoring                                                            |
 
-## Not yet possible (Phase 0)
+## Not yet possible (as of Phase 3)
 
 - Deploying to Cloudflare (`wrangler deploy`) — no production Worker
   exists yet.
-- Registering a Telegram webhook — no bot token, no deployed HTTPS
-  endpoint to point it at.
-- Querying a D1 database — none created yet (Phase 2).
-- Rotating a Secret — none registered yet.
+- Registering a Telegram webhook — no bot exists yet, and no Secret is
+  registered to verify it with.
+- Rotating a Secret — none registered yet (the remote D1 database exists
+  since Phase 2, but `TELEGRAM_WEBHOOK_SECRET`/`TELEGRAM_BOT_TOKEN` are
+  not).
 - Running `/status` in a real Telegram chat — no bot exists yet.
+- Exercising the webhook boundary against real Telegram traffic — it's
+  implemented and tested locally (Phase 3), but nothing external points
+  at it yet.
 
 ## GitHub Codespaces
 

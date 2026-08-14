@@ -1,10 +1,9 @@
 /**
- * Phase 0 scaffold only.
- *
- * This Worker does not talk to Telegram, OpenAI, or D1 yet. It exists so
- * that CI, deployment tooling, and local dev have something real to run
- * against. See docs/implementation-plan.md for what comes next.
+ * Phase 3: adds the Telegram webhook boundary. OpenAI translation and
+ * reply-posting are not wired in yet — see docs/implementation-plan.md.
  */
+
+import { handleTelegramWebhook } from "./handlers/telegram-webhook";
 
 interface ErrorBody {
   error: {
@@ -28,11 +27,15 @@ function notFound(): Response {
 }
 
 export default {
-  fetch(request: Request, _env: Env, _ctx: ExecutionContext): Response {
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/health") {
       return jsonResponse({ status: "ok", service: "telegram-translation-ptbr-ja" }, 200);
+    }
+
+    if (request.method === "POST" && url.pathname === "/telegram/webhook") {
+      return await handleTelegramWebhook(request, env);
     }
 
     return notFound();

@@ -42,12 +42,16 @@ SETUP_ADMIN_SECRET
 
 ## Telegram Webhook Secret verification
 
-Once the webhook is implemented (Phase 3), every incoming webhook request
-must be verified using Telegram's `X-Telegram-Bot-Api-Secret-Token` header
-compared against `TELEGRAM_WEBHOOK_SECRET` before any other processing.
-Requests that fail this check are rejected immediately (no D1 read, no
-OpenAI call). The webhook endpoint itself is not registered until Phase 8
-per the implementation plan — this rule takes effect the moment it is.
+Implemented: `POST /telegram/webhook` verifies Telegram's
+`X-Telegram-Bot-Api-Secret-Token` header against `TELEGRAM_WEBHOOK_SECRET`
+(`src/infrastructure/telegram/webhook-secret.ts`) before any body read,
+JSON parse, or D1 access. A missing header, a mismatched value, or an
+unconfigured/empty `TELEGRAM_WEBHOOK_SECRET` are all rejected with 401
+(fail closed). The comparison uses the Workers-runtime
+`crypto.subtle.timingSafeEqual` extension. The webhook endpoint itself is
+not registered with Telegram until Phase 8 per the implementation plan —
+this code path only runs when the real webhook (or a test) sends a
+request to it.
 
 ## Chat allowlist
 
@@ -137,6 +141,14 @@ either).
 - Retries apply only to transient failures (network errors, 429, 5xx) —
   see `docs/project-rules.md` rules 7–8 for the general rule and retry
   cap requirement.
+- **Implemented (Phase 3):** `src/infrastructure/telegram/client.ts`
+  applies a timeout to every Telegram API call and classifies the result
+  as a `TransientUpstreamError` (timeout, network failure, HTTP 429/5xx,
+  or `error_code` 429/5xx in the response body) or a
+  `PermanentUpstreamError` (other 4xx, a non-JSON response, or a response
+  that fails boundary validation). This phase only classifies errors — it
+  does not itself retry; capped, transient-only retry logic is Phase 4+
+  work (`docs/project-rules.md` rules 7–8).
 
 ## D1 / SQL injection
 

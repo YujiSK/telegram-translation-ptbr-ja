@@ -1,8 +1,11 @@
 # Implementation Plan
 
-**Current phase: Phase 2 completed.** The local migration, repository layer,
-local D1 tests, remote database creation, and real `database_id` wiring are
-complete. The initial migration is applied remotely and Phase 3 has not started.
+**Current phase: Phase 3 in progress.** The local webhook boundary (secret
+verification, parsing, allowlist/dedupe wiring) and the mockable Telegram
+`sendMessage` client are implemented and tested locally. Telegram Bot
+creation, Cloudflare Secret registration, Worker deployment, and Telegram
+webhook registration are all still **pending** — Phase 3 is not marked
+`completed` until those external steps happen. Phase 4 has not started.
 
 Rule for every phase (see `docs/project-rules.md` rules 13–14): implement
 one phase at a time, verify with `npm run check` before moving to the
@@ -120,6 +123,19 @@ migrations apply --local`); repository functions have tests using local
 ---
 
 ## Phase 3 — Telegram
+
+**Status: local implementation complete; external steps pending.** The
+webhook boundary (`POST /telegram/webhook`), Secret verification,
+allowlist/dedupe wiring, and a mockable `sendMessage` client are
+implemented as `src/handlers/telegram-webhook.ts`,
+`src/infrastructure/telegram/{webhook-secret,client,send-message}.ts`,
+and `src/env.d.ts`, with tests under the mirrored `test/` paths and
+`npm run check` green. **Not done yet, and required before this phase can
+be marked `completed`:** creating the Telegram bot (BotFather), registering
+`TELEGRAM_WEBHOOK_SECRET`/`TELEGRAM_BOT_TOKEN` as real Cloudflare Secrets,
+deploying the Worker, and registering the Telegram webhook — all four are
+explicit, human-approved, external actions per `CLAUDE.md` and were not
+performed in this change.
 
 - **目的:** Receive and validate real Telegram webhook traffic, and be
   able to post a reply — without any translation logic yet.
