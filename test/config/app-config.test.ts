@@ -79,6 +79,18 @@ describe("validateAppConfig — OPENAI_MODEL", () => {
 
     expect(result.ok).toBe(false);
   });
+
+  it.each([" gpt-4o-mini", "gpt-4o-mini ", "\tgpt-4o-mini\n"])(
+    "rejects leading or trailing whitespace in %j rather than normalizing it",
+    (openaiModel) => {
+      const result = validateAppConfig({ ...validInput, OPENAI_MODEL: openaiModel });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.key).toBe("OPENAI_MODEL");
+      }
+    },
+  );
 });
 
 describe("validateAppConfig — MAX_TRANSLATABLE_MESSAGE_LENGTH", () => {

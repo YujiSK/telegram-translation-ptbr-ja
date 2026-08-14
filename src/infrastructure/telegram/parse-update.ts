@@ -14,20 +14,29 @@ import { ValidationError, type Result } from "../../shared/errors";
  * field-by-field with type guards, per docs/project-rules.md rules 1-2
  * and Phase 1's brief.
  *
- * ID handling: per the Telegram Bot API docs ("Bot API dialog IDs" /
- * core.telegram.org/api/bots/ids and the Bot API 5.1 changelog),
- * update_id/user id/chat id/message id can have up to 52 significant
- * bits and are documented as safe to store in a 64-bit integer *or* a
- * double-precision float — i.e. exactly the range `Number.isSafeInteger`
- * guarantees (±(2^53 - 1)). We validate against that, not a 32-bit range.
+ * ID handling: Telegram documents Bot API dialog IDs (users and chats)
+ * as potentially wider than 32 bits but having at most 52 significant
+ * bits. All numeric identifiers parsed here must therefore be safe
+ * JavaScript integers, with sign constraints applied according to each
+ * field's semantics instead of treating every Telegram ID alike.
  */
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function readTelegramId(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
+function readNonNegativeId(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function readPositiveId(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function readNonZeroId(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value !== 0
+    ? value
+    : undefined;
 }
 
 function readNonEmptyString(value: unknown): string | undefined {
@@ -62,7 +71,7 @@ function parseSpeaker(from: unknown): SpeakerIdentity | undefined {
   if (!isRecord(from)) {
     return undefined;
   }
-  const telegramUserId = readTelegramId(from.id);
+  const telegramUserId = readPositiveId(from.id);
   if (telegramUserId === undefined) {
     return undefined;
   }
@@ -94,7 +103,7 @@ export function parseTelegramUpdate(input: unknown): Result<InternalUpdate, Vali
     return invalidUpdate("Update must be a JSON object");
   }
 
-  const updateId = readTelegramId(input.update_id);
+  const updateId = readNonNegativeId(input.update_id);
   if (updateId === undefined) {
     return invalidUpdate("Update is missing a valid update_id", "update_id");
   }
@@ -116,7 +125,7 @@ export function parseTelegramUpdate(input: unknown): Result<InternalUpdate, Vali
     return invalidUpdate("Update.message must be a JSON object", "message");
   }
 
-  const messageId = readTelegramId(message.message_id);
+  const messageId = readPositiveId(message.message_id);
   if (messageId === undefined) {
     return invalidUpdate("Update.message.message_id is missing or invalid", "message.message_id");
   }
@@ -124,7 +133,7 @@ export function parseTelegramUpdate(input: unknown): Result<InternalUpdate, Vali
   if (!isRecord(message.chat)) {
     return invalidUpdate("Update.message.chat is missing or invalid", "message.chat");
   }
-  const chatId = readTelegramId(message.chat.id);
+  const chatId = readNonZeroId(message.chat.id);
   if (chatId === undefined) {
     return invalidUpdate("Update.message.chat.id is missing or invalid", "message.chat.id");
   }

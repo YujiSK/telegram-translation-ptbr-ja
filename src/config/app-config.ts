@@ -61,6 +61,9 @@ export function validateAppConfig(input: AppConfigInput): Result<AppConfig, Conf
   if (openaiModelRaw === undefined || openaiModelRaw.trim() === "") {
     return fail("OPENAI_MODEL", "is required");
   }
+  if (openaiModelRaw !== openaiModelRaw.trim()) {
+    return fail("OPENAI_MODEL", "must not have leading or trailing whitespace");
+  }
 
   const maxLengthRaw = input.MAX_TRANSLATABLE_MESSAGE_LENGTH;
   if (maxLengthRaw === undefined || maxLengthRaw === "") {

@@ -283,6 +283,33 @@ describe("parseTelegramUpdate — structurally invalid updates", () => {
     }
   });
 
+  it("rejects a negative update_id", () => {
+    const result = parseTelegramUpdate(buildTextUpdate({ updateId: -1 }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.field).toBe("update_id");
+    }
+  });
+
+  it("rejects an update_id outside JavaScript's safe-integer range", () => {
+    const result = parseTelegramUpdate(buildTextUpdate({ updateId: Number.MAX_SAFE_INTEGER + 1 }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.field).toBe("update_id");
+    }
+  });
+
+  it("rejects message_id zero", () => {
+    const result = parseTelegramUpdate(buildTextUpdate({ messageId: 0 }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.field).toBe("message.message_id");
+    }
+  });
+
   it("rejects a message missing chat.id", () => {
     const result = parseTelegramUpdate(buildTextUpdate({ omitChatId: true }));
 
@@ -301,6 +328,26 @@ describe("parseTelegramUpdate — structurally invalid updates", () => {
     }
   });
 
+  it("accepts a negative group chat.id", () => {
+    const result = parseTelegramUpdate(buildTextUpdate({ chatId: -1009876543210 }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok && result.value.kind === "text-message") {
+      expect(result.value.chatId).toBe(-1009876543210);
+    } else {
+      throw new Error("expected a text-message result");
+    }
+  });
+
+  it("rejects chat.id zero", () => {
+    const result = parseTelegramUpdate(buildTextUpdate({ chatId: 0 }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.field).toBe("message.chat.id");
+    }
+  });
+
   it("rejects a message missing from", () => {
     const result = parseTelegramUpdate(buildTextUpdate({ omitFrom: true }));
 
@@ -312,6 +359,15 @@ describe("parseTelegramUpdate — structurally invalid updates", () => {
 
   it("rejects a message whose from.id is not an integer", () => {
     const result = parseTelegramUpdate(buildTextUpdate({ userId: 700000001.5 }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.field).toBe("message.from");
+    }
+  });
+
+  it.each([0, -700000001])("rejects a non-positive from.id (%s)", (userId) => {
+    const result = parseTelegramUpdate(buildTextUpdate({ userId }));
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
