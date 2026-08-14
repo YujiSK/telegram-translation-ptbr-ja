@@ -1,0 +1,321 @@
+# Implementation Plan
+
+**Current phase: Phase 0 (Foundation).**
+
+Rule for every phase (see `docs/project-rules.md` rules 13–14): implement
+one phase at a time, verify with `npm run check` before moving to the
+next, and stop at the phase's stopping point until a human explicitly
+says to continue. Do not start Phase N+1 work while Phase N is open.
+
+Each phase below lists: purpose, what gets implemented, prerequisites,
+completion criteria, tests, manual work for Yuji, and the stopping point
+before the next phase.
+
+---
+
+## Phase 0 — Foundation
+
+**Status: in progress (this is the phase being completed now).**
+
+- **目的 (Purpose):** Stand up project conventions, documentation, tooling,
+  and a minimal deployable-shape Worker, with nothing product-specific
+  implemented yet.
+- **実装内容 (Implementation):** Project rules and docs (this file,
+  `architecture.md`, `data-model.md`, `security-and-privacy.md`,
+  `operations.md`, ADR 0001), `README.md`, `CLAUDE.md`, `AGENTS.md`, the
+  `telegram-translation-project` Claude Skill, a minimal `src/index.ts`
+  (`GET /health` + 404), test/lint/format/typecheck tooling, and CI.
+- **前提条件 (Prerequisites):** Empty repository (confirmed at the start
+  of this work).
+- **完了条件 (Completion criteria):** All Phase 0 files exist; `npm run
+check` passes; no Secrets present anywhere in the repo; CI config
+  exists and mirrors `npm run check`; no D1 migration, Telegram, or
+  OpenAI integration exists yet.
+- **テスト (Tests):** `GET /health` returns 200 with the documented JSON
+  body; unknown paths return 404; tests run inside the Workers runtime
+  (`@cloudflare/vitest-pool-workers`), not plain Node; no network calls
+  occur during tests.
+- **Yujiによる手動作業 (Manual work for Yuji):** Review and merge this
+  foundation; nothing external to set up yet (no Cloudflare/Telegram/
+  OpenAI accounts required for Phase 0 itself, though having them ready
+  before Phase 8–9 will help).
+- **次フェーズへ進む前の停止点 (Stop before next phase):** Stop after
+  Phase 0 is verified complete. Do not begin Phase 1 without an explicit
+  go-ahead.
+
+---
+
+## Phase 1 — Domain and configuration
+
+- **目的:** Establish the vendor-independent type vocabulary and
+  configuration validation the rest of the app will build on.
+- **実装内容:** `domain/` types (e.g., detected language, translation
+  request/result shapes, speaker identity shape used internally);
+  `config/` module that reads and validates non-secret configuration
+  (fails fast on missing/invalid config rather than defaulting silently);
+  a shared error-type hierarchy (`shared/` or `domain/`, TBD in-phase) for
+  distinguishing validation errors, upstream-service errors, and
+  transient/retryable errors; a converter from raw Telegram Update JSON
+  into an internal, minimal, validated type (no D1/OpenAI/Telegram client
+  calls involved yet — pure parsing).
+- **前提条件:** Phase 0 complete and verified.
+- **完了条件:** Domain types compile with no dependency on
+  `infrastructure/*`; config validation has unit tests for both valid and
+  invalid input; Telegram Update conversion has unit tests covering at
+  least one text message and one non-text/unsupported update shape;
+  `npm run check` green.
+- **テスト:** Unit tests only (Vitest, Workers runtime pool) — no real
+  Telegram/OpenAI/D1 calls, since none of those integrations exist yet.
+- **Yujiによる手動作業:** None required yet.
+- **次フェーズへ進む前の停止点:** Stop once domain/config/error types and
+  the Update converter are implemented and tested. Confirm before moving
+  to D1.
+
+---
+
+## Phase 2 — D1
+
+- **目的:** Stand up the actual database and the repository layer that
+  reads/writes it, per `docs/data-model.md`.
+- **実装内容:** First D1 migration (`wrangler d1 migrations create`),
+  covering the tables in `docs/data-model.md` (or the subset judged
+  ready); `infrastructure/d1/` repository functions for: allowlist
+  lookup, `processed_updates` check/record (dedupe), and speaker-profile
+  read/write. All queries parameterized (`docs/project-rules.md` rule 3).
+  D1 binding (`DB`) added to `wrangler.jsonc` for the first time; local
+  dev uses `--local` D1.
+- **前提条件:** Phase 1 complete; a Cloudflare account with D1 access
+  available (Yuji — see manual work below) for creating the actual
+  database resource, even though this phase's local dev/tests can run
+  against local D1 without it.
+- **完了条件:** Migration applies cleanly locally (`wrangler d1
+migrations apply --local`); repository functions have tests using local
+  D1 via the Workers Vitest integration; no SQL is string-interpolated;
+  `npm run check` green.
+- **テスト:** Vitest tests against local D1 (`applyD1Migrations` in a test
+  setup file, per Cloudflare's Vitest+D1 integration pattern) — covering
+  allowlist hit/miss, dedupe hit/miss, and profile read/write round-trip.
+- **Yujiによる手動作業:** Create the actual D1 database in the Cloudflare
+  dashboard/CLI (`wrangler d1 create`) — this is a real Cloudflare
+  resource, so it needs explicit human action rather than being created
+  by an agent unattended. Provide the resulting `database_id` for
+  `wrangler.jsonc`.
+- **次フェーズへ進む前の停止点:** Stop once migration + repository layer
+  are implemented, tested locally, and `database_id` is wired in. Confirm
+  before starting Telegram integration.
+
+---
+
+## Phase 3 — Telegram
+
+- **目的:** Receive and validate real Telegram webhook traffic, and be
+  able to post a reply — without any translation logic yet.
+- **実装内容:** `handlers/` webhook entry point; Secret verification via
+  `X-Telegram-Bot-Api-Secret-Token` against `TELEGRAM_WEBHOOK_SECRET`
+  (reject before any other processing); text extraction from the Update
+  (reusing Phase 1's converter); `infrastructure/telegram/` Bot API
+  client (typed, timeout-bound); reply-posting capability (used later by
+  Phase 4, but built and tested here against a stubbed/mocked Bot API).
+- **前提条件:** Phase 2 complete (dedupe/allowlist available to gate
+  processing).
+- **完了条件:** Webhook handler rejects requests with a missing/incorrect
+  Secret header; valid requests are parsed and deduped via Phase 2's
+  repository; Bot API client has a bounded timeout and typed
+  request/response; `npm run check` green. The webhook is **not**
+  registered with Telegram yet (that's Phase 8) — this phase only makes
+  the endpoint correct in isolation.
+- **テスト:** Unit/integration tests using mocked/fetch-intercepted
+  Telegram API responses — no live Telegram account traffic. Cases:
+  correct Secret accepted, wrong/missing Secret rejected, duplicate
+  `update_id` short-circuited, non-allowlisted chat ignored.
+- **Yujiによる手動作業:** Create the Telegram bot via BotFather and
+  obtain its token, for use starting in this phase's local testing
+  (`.dev.vars`, never committed). Provide a real chat ID for later
+  allowlisting (used starting Phase 8/9, but convenient to gather now).
+- **次フェーズへ進む前の停止点:** Stop once webhook verification, parsing,
+  dedupe, and a working (but not-yet-registered) Bot API client are
+  implemented and tested. Confirm before adding OpenAI.
+
+---
+
+## Phase 4 — OpenAI translation
+
+- **目的:** Implement the actual translation capability: one OpenAI
+  request per message, producing language detection + translation +
+  low-risk style features.
+- **実装内容:** `infrastructure/openai/` Responses API client with
+  Structured Outputs (a single JSON-schema-constrained call); `prompts/`
+  versioned prompt template(s) for JA↔PT-BR translation, tone/emoji/name
+  preservation, and skip-if-untargeted-language behavior; timeout +
+  limited retry (transient errors only, capped attempts, per
+  `docs/project-rules.md` rules 6–8); output validation (reject/retry on
+  a response that doesn't match the expected schema, rather than posting
+  garbage).
+- **前提条件:** Phase 3 complete (so a real message can flow in and a
+  reply can flow out once this phase wires them together).
+- **完了条件:** A JA input and a PT-BR input each produce a correctly
+  targeted translation via the Structured Outputs schema in tests; a
+  third-language input is correctly classified as "don't translate";
+  timeout and retry-cap behavior is exercised by tests (e.g., simulated
+  slow/failing responses); no raw prompt or message text is logged;
+  `npm run check` green.
+- **テスト:** Unit/integration tests against a mocked OpenAI HTTP
+  response (no live OpenAI spend in CI). Cases: JA→PT-BR, PT-BR→JA,
+  untargeted-language skip, malformed-response handling, timeout
+  handling, retry-cap exhaustion.
+- **Yujiによる手動作業:** Provide an OpenAI API key for local
+  `.dev.vars` testing (never committed); be aware this phase's local
+  testing may incur small real OpenAI costs if tests are run against the
+  live API rather than mocks (tests are designed to use mocks — live
+  testing is optional and manual).
+- **次フェーズへ進む前の停止点:** Stop once translation end-to-end
+  (Telegram in → OpenAI → Telegram reply out) works in local/dev testing
+  with mocked or manually-triggered live calls. Confirm before speaker
+  memory.
+
+---
+
+## Phase 5 — Speaker memory
+
+- **目的:** Make translations reflect stored, per-speaker
+  preferences/style, with explicit settings always overriding
+  auto-derived ones.
+- **実装内容:** Read path: resolve a speaker's effective settings by
+  merging `speaker_profiles` (auto-derived, low-risk) with
+  `speaker_preferences` (explicit) and `translation_corrections`,
+  explicit-always-wins, before building the OpenAI prompt; write path:
+  update `speaker_profiles`' low-risk auto-derived fields from the same
+  OpenAI response that already extracts them (Phase 4), without a second
+  API call; memory-priority logic isolated so it's independently testable
+  (see `docs/security-and-privacy.md` — explicit over inferred).
+- **前提条件:** Phase 4 complete.
+- **完了条件:** A speaker with an explicit preference gets that
+  preference honored even when auto-derived signals would suggest
+  otherwise (tested explicitly); a speaker with no explicit preference
+  falls back to auto-derived style; corrections from
+  `translation_corrections` are applied when present; `npm run check`
+  green.
+- **テスト:** Unit tests for the merge/priority function in isolation
+  (no live services needed), plus integration tests confirming the
+  merged settings actually reach the OpenAI prompt construction step.
+- **Yujiによる手動作業:** None beyond ongoing review.
+- **次フェーズへ進む前の停止点:** Stop once memory read/write and
+  priority resolution are implemented and tested. Confirm before adding
+  commands.
+
+---
+
+## Phase 6 — Commands
+
+- **目的:** Implement the Telegram command surface for status, profile
+  management, memory management, and admin control.
+- **実装内容:** `commands/` implementations for `/status`, `/profile`,
+  `/remember`, `/forget`, `/forgetme`, `/correct`, `/help`, and
+  admin-only `/enable` / `/disable` (with the authorization check from
+  `docs/security-and-privacy.md`); command dispatch wired into the
+  webhook handler from Phase 3.
+- **前提条件:** Phase 5 complete (commands operate on the same
+  profile/preference/correction tables).
+- **完了条件:** Each command has at least one success-path and one
+  failure/authorization-denied-path test (where applicable); `/forgetme`
+  actually removes the documented rows (`docs/data-model.md`); `/enable`
+  and `/disable` are rejected for non-admin callers; `npm run check`
+  green.
+- **テスト:** Integration tests per command against local D1 and mocked
+  Telegram/OpenAI as needed. No live external calls in CI.
+- **Yujiによる手動作業:** Decide/provide the concrete admin
+  identification mechanism if it requires a real Telegram user ID (e.g.,
+  Yuji's own ID as the initial admin).
+- **次フェーズへ進む前の停止点:** Stop once all listed commands are
+  implemented and tested. Confirm before the reliability/security
+  hardening phase.
+
+---
+
+## Phase 7 — Reliability and security
+
+- **目的:** Harden the bot for real (if small-scale) production traffic:
+  dedupe correctness under load, rate/usage limits, structured logging,
+  and a security-focused test pass.
+- **実装内容:** Confirm/extend duplicate-update-processing prevention
+  under concurrent delivery; rate limiting (per-chat and/or global) and a
+  usage/cost ceiling for OpenAI calls (`docs/security-and-privacy.md`);
+  structured logging with the log-minimization rules from
+  `docs/security-and-privacy.md` (no message text, no Secrets); explicit
+  error classification (validation vs. transient vs. permanent) feeding
+  consistent retry/no-retry behavior; a security-focused test pass
+  covering the threat list in `docs/security-and-privacy.md`.
+- **前提条件:** Phase 6 complete.
+- **完了条件:** Rate limit and usage ceiling are enforced and tested
+  (including the "safe failure" behavior when exceeded); structured logs
+  contain no message text or Secrets (verified by test/inspection); the
+  security test pass covers each row of the threat table in
+  `docs/security-and-privacy.md`; `npm run check` green.
+- **テスト:** Unit tests for rate-limit/usage-ceiling logic; targeted
+  security tests (e.g., forged webhook Secret, SQL-injection-shaped
+  input, oversized/malformed payloads) — all still without live external
+  spend.
+- **Yujiによる手動作業:** Decide concrete rate-limit/usage-ceiling
+  numbers appropriate for a family-scale deployment (this is a product
+  decision, not a technical one).
+- **次フェーズへ進む前の停止点:** Stop once reliability/security work is
+  implemented and tested. Confirm before deployment preparation.
+
+---
+
+## Phase 8 — Deployment preparation
+
+- **目的:** Make the project ready to deploy, without actually deploying
+  to production or registering the live webhook yet (both remain
+  explicit, separate, human-approved actions).
+- **実装内容:** Finalize Cloudflare Binding configuration in
+  `wrangler.jsonc` (D1, and anything else needed); document the exact
+  Secret-registration steps (`wrangler secret put` for each of the four
+  planned Secrets); document the D1 migration-apply procedure for a real
+  (non-local) database; propose (design only, or implement if explicitly
+  approved) a GitHub → Cloudflare auto-deploy workflow; design (not yet
+  register) the webhook-setup endpoint, gated behind
+  `SETUP_ADMIN_SECRET`.
+- **前提条件:** Phase 7 complete.
+- **完了条件:** A documented, reviewed runbook exists for: registering
+  Secrets, applying migrations to the real database, and deploying the
+  Worker; the webhook-setup endpoint design is reviewed; nothing in this
+  phase performs an actual production deploy or webhook registration
+  without explicit separate approval, per `CLAUDE.md`.
+- **テスト:** Any new endpoint (e.g., webhook-setup) gets the same
+  unit/integration test treatment as prior phases, run against local
+  dev — not production.
+- **Yujiによる手動作業:** Approve and personally trigger (or explicitly
+  authorize an agent to trigger) the first real deploy and Secret
+  registration; these are exactly the "external service changes" that
+  require explicit approval per `CLAUDE.md`.
+- **次フェーズへ進む前の停止点:** Stop before any real `wrangler deploy`
+  to production, any real `wrangler secret put`, and any real Telegram
+  webhook registration — all require Yuji's explicit go-ahead, granted
+  separately from this plan.
+
+---
+
+## Phase 9 — Pilot
+
+- **目的:** Validate the bot with real (but limited) usage before calling
+  it production-ready.
+- **実装内容:** Enable the bot for a single, limited family group;
+  exercise a set of prepared JA↔PT-BR test cases; assess translation
+  quality subjectively (tone, name/emoji preservation) and objectively
+  where possible; measure actual OpenAI cost against expectations;
+  compare translation quality/behavior with and without speaker memory
+  enabled, to confirm Phase 5 is actually adding value; produce a
+  go/no-go recommendation for broader "production" use.
+- **前提条件:** Phase 8 complete, and Yuji has explicitly approved and
+  performed the real deploy + webhook registration.
+- **完了条件:** Pilot test cases run and results recorded; cost figures
+  captured; a written go/no-go recommendation exists.
+- **テスト:** Manual, real-world usage in the pilot group — this phase is
+  itself the test, on top of all automated tests from prior phases
+  remaining green.
+- **Yujiによる手動作業:** Select the pilot group; participate in and
+  observe real usage; make the final go/no-go call.
+- **次フェーズへ進む前の停止点:** This is the last phase in this plan.
+  Any work beyond pilot validation (broader rollout, new features) is a
+  new planning cycle, not an automatic continuation.

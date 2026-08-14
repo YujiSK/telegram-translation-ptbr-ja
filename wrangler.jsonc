@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Worker name as it will appear in the Cloudflare dashboard.
+  "name": "telegram-translation-ptbr-ja",
+  "main": "src/index.ts",
+  // New project: pinned to the date this project was scaffolded.
+  // Review before bumping — see https://developers.cloudflare.com/workers/configuration/compatibility-dates/
+  "compatibility_date": "2026-08-14",
+  // nodejs_compat is intentionally omitted for Phase 0. The health-check
+  // scaffold only uses Web-standard APIs. Add it in the phase that first
+  // needs a Node.js built-in (for example, an OpenAI SDK that relies on
+  // Node APIs), and document why in docs/project-rules.md when it happens.
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+  },
+  // D1 binding is intentionally not configured yet — see docs/data-model.md
+  // and docs/implementation-plan.md (Phase 2). When added, the binding name
+  // will be "DB", per docs/project-rules.md.
+}

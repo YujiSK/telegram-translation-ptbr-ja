@@ -1,0 +1,11 @@
+# Copy this file to .dev.vars for local development and fill in real values
+# there. .dev.vars is gitignored and must never be committed.
+#
+# These are also the names of the Cloudflare Worker secrets that will be
+# registered later (via `wrangler secret put`), in a phase that explicitly
+# covers deployment. Do not put real values in this example file.
+
+OPENAI_API_KEY=
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_WEBHOOK_SECRET=
+SETUP_ADMIN_SECRET=
