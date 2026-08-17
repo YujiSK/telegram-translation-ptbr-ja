@@ -1,17 +1,23 @@
 # Architecture
 
 Status: **Foundation, domain, D1 repository layer, the Telegram webhook
-boundary, and OpenAI translation are implemented (Phase 4 complete).**
-`POST /telegram/webhook` verifies the Secret header, parses the Update,
-gates on the allowlist/dedupe tables, calls OpenAI exactly once per
-message via `src/infrastructure/openai/translate.ts`, and — on a
-`translated` outcome — posts the reply via
-`src/infrastructure/telegram/send-message.ts`. See
+boundary, OpenAI translation, and speaker memory are implemented (Phase 5
+complete).** `POST /telegram/webhook` verifies the Secret header, parses
+the Update, gates on the allowlist/dedupe tables, reads speaker memory
+(`src/domain/speaker-memory.ts`, `src/infrastructure/d1/{speaker-profiles,speaker-preferences,translation-corrections}.ts`),
+calls OpenAI exactly once per message via
+`src/infrastructure/openai/translate.ts` (prompt built by
+`src/prompts/translation-v2.ts`), and — on a `translated` outcome — posts
+the reply via `src/infrastructure/telegram/send-message.ts` and
+best-effort records the observed style. See
 `src/handlers/telegram-webhook.ts` and `src/application/translate-and-reply.ts`.
-Every OpenAI/Telegram call in tests is mocked; no real OpenAI API call has
-been made. No Telegram bot has been created, no Secret is registered, no
-webhook is registered with Telegram, and the Worker is not deployed —
-those four actions are deferred to Phase 8. See
+Every OpenAI/Telegram call in tests is mocked; no real OpenAI/Telegram
+API call has been made, and the Phase 5 D1 migration
+(`migrations/0002_speaker_memory.sql`) has been applied and tested only
+locally, not against the remote database. No Telegram bot has been
+created, no Secret is registered, no webhook is registered with
+Telegram, and the Worker is not deployed — those four actions, plus the
+remote migration, are deferred to Phase 8. See
 `docs/implementation-plan.md` for phasing.
 
 ## Request flow (target design)
@@ -24,17 +30,24 @@ Telegram Bot API ── webhook POST ──▶ Cloudflare Worker (handlers/)
         │                                   │
         │                                   ├─▶ infrastructure/d1 (D1, binding "DB")
         │                                   │     - allowlist check
-        │                                   │     - speaker profile / preferences / corrections lookup
         │                                   │     - processed-update-id check (dedupe)
+        │                                   │     - speaker profile / preferences / corrections
+        │                                   │       lookup (speaker memory read)
         │                                   │
         │                                   ├─▶ infrastructure/openai (OpenAI API)
         │                                   │     - one request: language detection +
         │                                   │       translation + low-risk style-feature
-        │                                   │       extraction
+        │                                   │       extraction, informed by the speaker
+        │                                   │       memory read above
         │                                   │
-        │                                   └─▶ infrastructure/telegram (Telegram Bot API)
-        │                                         - post translation as a reply to the
-        │                                           original message
+        │                                   ├─▶ infrastructure/telegram (Telegram Bot API)
+        │                                   │     - post translation as a reply to the
+        │                                   │       original message
+        │                                   │
+        │                                   └─▶ infrastructure/d1 (D1, binding "DB")
+        │                                         - best-effort observed-style write
+        │                                           (speaker memory write, after a
+        │                                           successful reply only)
         ▼
 Telegram group (translation posted as a reply)
 ```
@@ -64,6 +77,23 @@ webhook in, `handlers/` dispatches, `application/` orchestrates
   storage.
 - **Single OpenAI model:** `gpt-4o-mini`, called via the Responses API
   with Structured Outputs (see `docs/implementation-plan.md` Phase 4).
+- **Speaker memory never adds a second OpenAI call.** Memory is read
+  once, before the single translation call, and folded into that same
+  call's prompt as a soft hint (style) or term data (corrections) — see
+  `docs/implementation-plan.md` Phase 5. The style signals observed
+  _from_ that same call's response are what gets written back afterward,
+  not a separately-requested observation.
+- **Explicit preference always outranks observed style, per axis.**
+  `src/domain/speaker-memory.ts`'s `resolveEffectiveSpeakerMemory`
+  resolves `tone` and `emojiUsage` independently — an explicit `tone`
+  does not affect whether `emojiUsage` falls back to the observed value,
+  and vice versa. Term corrections are a separate axis entirely, applied
+  only when a correction's exact source term appears in the current
+  message and its stated direction matches the language direction OpenAI
+  determines — never based on style priority.
+- **Speaker memory is scoped strictly to `(chat_id, user_id)`.** Never
+  merged or shared across chats or users, and never inferred from a
+  Telegram-wide profile — see `docs/data-model.md`.
 
 ## External dependency boundaries
 
@@ -125,12 +155,49 @@ rule 2.
   trade-off with a stronger idempotency mechanism.
 - If D1 is unavailable, the request fails safe (500): no translation is
   posted with stale/guessed speaker settings silently substituted for
-  explicit ones.
+  explicit ones. This includes a speaker-memory read failure: the
+  webhook never proceeds to the OpenAI/Telegram call in that case (see
+  "Speaker memory read/write ordering" below).
+- A speaker-memory **write** failure, after the Telegram reply already
+  succeeded, is never treated as a request failure — the webhook still
+  responds 200 `translated`, and the dedupe reservation is kept (not
+  released), so Telegram never redelivers an update whose translation
+  was already sent. See "Speaker memory read/write ordering" below.
 - The bot never automatically posts an error-explanation message to the
   family group for any of the failures above — a failure is visible only
   as an absent reply plus a 500 response to Telegram (and, once Phase 7
   adds structured logging, an operator-visible log entry without message
   text).
+
+## Speaker memory read/write ordering
+
+Speaker memory (Phase 5) is read once, before the OpenAI call, and
+written back best-effort, after the Telegram reply — see
+`src/application/translate-and-reply.ts`:
+
+1. **Read** (`getSpeakerProfile`, `getSpeakerPreferences`,
+   `listTranslationCorrections`, resolved by
+   `resolveEffectiveSpeakerMemory`): a failure here propagates — the
+   webhook responds 500 and never calls OpenAI or Telegram for this
+   update. This is the same "fail safe, no guessed substitution" policy
+   as any other D1 failure.
+2. **Translate** and **reply**: unchanged from Phase 4 — a failure in
+   either propagates and is never treated as success.
+3. **Write** (`upsertObservedSpeakerStyle`, only when the outcome is
+   `translated` and carries `styleSignals`): wrapped in a best-effort
+   `try`/`catch` inside `translateAndReply` itself, so a write failure
+   **never** propagates out of the use case. The webhook still responds
+   200, and — critically — the dedupe reservation is **not** released for
+   this failure (unlike a transient OpenAI/Telegram failure): the reply
+   was already sent, so releasing the reservation would let a Telegram
+   redelivery send a **second** reply for the same update. A lost
+   observed-style update is an acceptable, low-severity outcome (the next
+   message from the same speaker will simply be missing one style
+   observation); a duplicate reply to the family group is not.
+   Phase 7 (structured logging) is the natural place to make this
+   swallowed failure operator-visible — as a status/error-class log
+   entry, never message text or Secrets — without changing this
+   response/dedupe behavior.
 
 ## Dedupe and retry after a transient failure
 

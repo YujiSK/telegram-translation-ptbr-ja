@@ -4,24 +4,30 @@ A Telegram bot that translates between Japanese and Brazilian Portuguese
 in a family group chat, aiming to keep tone, emoji, names, and forms of
 address natural in both directions.
 
-## Current status: Phase 4 complete — bot not deployed
+## Current status: Phase 5 complete — bot not deployed
 
 This repository currently contains project conventions, documentation, a
 Worker with `GET /health` and a `POST /telegram/webhook` boundary, CI/test
 tooling, a vendor-independent domain/config/error layer, a pure Telegram
 Update parser, a locally tested D1 migration/repository layer, a
-mockable Telegram `sendMessage` client, and a full OpenAI translation
+mockable Telegram `sendMessage` client, a full OpenAI translation
 pipeline (versioned prompt, Structured Outputs client, timeout + capped
-transient-only retry, and the translate-and-reply application use case).
-The webhook verifies Telegram's Secret header, gates messages through the
-allowlist/dedupe tables, calls OpenAI exactly once per message, and posts
-the translated reply — all tested against mocked OpenAI/Telegram HTTP
-responses; no real OpenAI API call has been made. No Telegram bot has
-been created, no Secret is registered, the Worker is not deployed, and no
-webhook is registered with Telegram — those four actions belong to
-Phase 8. See [`docs/implementation-plan.md`](docs/implementation-plan.md)
-for the full phased plan — **Phases 0–4 are complete** and Phase 5
-(speaker memory) has not started.
+transient-only retry, and the translate-and-reply application use case),
+and speaker memory: per-`(chat_id, user_id)` auto-observed style,
+explicit preferences, and short term corrections, resolved
+explicit-over-observed and folded into the OpenAI prompt without a second
+API call. The webhook verifies Telegram's Secret header, gates messages
+through the allowlist/dedupe tables, reads speaker memory, calls OpenAI
+exactly once per message, posts the translated reply, and best-effort
+records the observed style — all tested against mocked OpenAI/Telegram
+HTTP responses and local D1; no real OpenAI/Telegram API call has been
+made, and the Phase 5 migration has been applied only locally. No
+Telegram bot has been created, no Secret is registered, the Worker is not
+deployed, and no webhook is registered with Telegram — those four
+actions, plus the remote migration, belong to Phase 8. See
+[`docs/implementation-plan.md`](docs/implementation-plan.md) for the full
+phased plan — **Phases 0–5 are complete** and Phase 6 (commands) has not
+started.
 
 ## Architecture (planned)
 
@@ -86,7 +92,7 @@ telegram-translation-ptbr-ja/
 ├── src/
 │   ├── index.ts                                            # Worker: GET /health, POST /telegram/webhook, 404 otherwise
 │   ├── env.d.ts                                             # Secret binding types (merged into the generated Env)
-│   ├── domain/                                             # vendor-independent types (language, speaker, translation, telegram-update)
+│   ├── domain/                                             # vendor-independent types (language, speaker, translation, telegram-update, speaker-memory)
 │   ├── config/                                             # non-secret config validation
 │   ├── prompts/                                            # versioned OpenAI prompt + Structured Outputs schema
 │   ├── application/                                        # translate-and-reply use case (boundary interfaces only)
@@ -97,6 +103,7 @@ telegram-translation-ptbr-ja/
 │   └── shared/errors.ts                                    # error hierarchy (validation/config/upstream)
 ├── test/                                                   # mirrors src/, plus health.test.ts for the scaffold
 ├── migrations/0001_initial.sql                             # local Phase 2 D1 schema (applied remotely)
+├── migrations/0002_speaker_memory.sql                      # local Phase 5 D1 schema (applied locally only — see Phase 8)
 ├── .dev.vars.example                                       # empty-valued template for local Secrets
 ├── CLAUDE.md / AGENTS.md                                   # agent instructions (point to docs/project-rules.md)
 ├── worker-configuration.d.ts                               # generated binding/runtime types
@@ -163,10 +170,14 @@ template.
 ## Cloudflare D1 binding
 
 Binding name: **`DB`**. The real database name and ID are configured, while
-local development continues to use local D1 by default. The initial migration
-has been applied remotely; the Worker has not been deployed. See
-[`docs/data-model.md`](docs/data-model.md) and
-[`docs/implementation-plan.md`](docs/implementation-plan.md) Phase 2.
+local development continues to use local D1 by default. The initial
+migration (`0001_initial.sql`) has been applied remotely; the Phase 5
+migration (`0002_speaker_memory.sql`) has been applied and verified
+locally only (`wrangler d1 migrations apply --local`) — applying it to
+the remote database is a Phase 8 action. The Worker has not been
+deployed. See [`docs/data-model.md`](docs/data-model.md) and
+[`docs/implementation-plan.md`](docs/implementation-plan.md) Phases 2
+and 5.
 
 ## Testing
 
@@ -179,16 +190,22 @@ Tests run inside the actual Workers runtime via
 Worker-specific and local D1 behavior are exercised faithfully. Coverage
 includes `test/health.test.ts` (the health/404 scaffold),
 `test/handlers/telegram-webhook.test.ts` (Secret verification, parsing,
-allowlist/dedupe gating, the full translate-and-reply flow, and the
-dedupe-release policy on transient vs. permanent failures, all against
-local D1), `test/infrastructure/telegram/{webhook-secret,send-message}.test.ts`
+allowlist/dedupe gating, the full translate-and-reply flow including
+speaker memory read/write, and the dedupe-release policy on transient
+vs. permanent failures, all against local D1),
+`test/infrastructure/telegram/{webhook-secret,send-message}.test.ts`
 (Secret comparison and the `sendMessage` client's error classification),
 `test/infrastructure/openai/{client,translate}.test.ts` (Structured
 Outputs request/response handling, retry/timeout behavior, and malformed-
-response rejection), `test/prompts/translation-v1.test.ts` (prompt shape
-and schema), and `test/application/translate-and-reply.test.ts` (the use
-case in isolation). No test calls the real Telegram, OpenAI, or remote
-D1 — outbound `fetch` is always a supplied mock.
+response rejection), `test/prompts/{translation-v1,translation-v2}.test.ts`
+(prompt shape and schema for both versions), `test/application/translate-and-reply.test.ts`
+(the use case in isolation, including the memory read/write ordering and
+failure policy), `test/domain/speaker-memory.test.ts` (the
+explicit-over-observed priority resolver and correction selection, in
+isolation), and `test/infrastructure/d1/{repositories,speaker-memory-repositories}.test.ts`
+(the Phase 2 and Phase 5 D1 repositories, including both migrations
+applied in order against local D1). No test calls the real Telegram,
+OpenAI, or remote D1 — outbound `fetch` is always a supplied mock.
 
 ## Deployment
 

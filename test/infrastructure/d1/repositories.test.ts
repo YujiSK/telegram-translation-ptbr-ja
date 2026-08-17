@@ -9,6 +9,7 @@ import {
 } from "../../../src/infrastructure/d1/processed-updates";
 import {
   getSpeakerProfile,
+  upsertObservedSpeakerStyle,
   upsertSpeakerProfile,
 } from "../../../src/infrastructure/d1/speaker-profiles";
 
@@ -18,24 +19,54 @@ const USER_ONE = 800000001;
 
 beforeEach(async () => {
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM speaker_preferences"),
+    env.DB.prepare("DELETE FROM translation_corrections"),
     env.DB.prepare("DELETE FROM speaker_profiles"),
     env.DB.prepare("DELETE FROM processed_updates"),
     env.DB.prepare("DELETE FROM allowed_chats"),
   ]);
 });
 
-describe("initial D1 migration", () => {
-  it("creates the three Phase 2 tables and the migration ledger", async () => {
+describe("D1 migrations 0001 and 0002 applied in order", () => {
+  it("creates every Phase 2 and Phase 5 table plus the migration ledger", async () => {
     const rows = await env.DB.prepare(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('allowed_chats', 'processed_updates', 'speaker_profiles', 'd1_migrations') ORDER BY name",
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('allowed_chats', 'processed_updates', 'speaker_profiles', 'speaker_preferences', 'translation_corrections', 'd1_migrations') ORDER BY name",
     ).all();
 
     expect(rows.results.map((row) => row.name)).toEqual([
       "allowed_chats",
       "d1_migrations",
       "processed_updates",
+      "speaker_preferences",
       "speaker_profiles",
+      "translation_corrections",
     ]);
+  });
+
+  it("recorded both migrations in the ledger", async () => {
+    const rows = await env.DB.prepare("SELECT name FROM d1_migrations ORDER BY name").all();
+    expect(rows.results.map((row) => row.name)).toEqual([
+      "0001_initial.sql",
+      "0002_speaker_memory.sql",
+    ]);
+  });
+
+  it("keeps a Phase 2-shaped insert (no observed columns) working after the Phase 5 migration", async () => {
+    // Simulates "an existing row survives the migration": the Phase 2
+    // column set alone must still be a valid insert once 0002 has added
+    // observed_tone/observed_emoji_usage as nullable columns.
+    await env.DB.prepare(
+      "INSERT INTO speaker_profiles (chat_id, user_id, display_name, primary_language) VALUES (?1, ?2, ?3, ?4)",
+    )
+      .bind(CHAT_ONE, USER_ONE, "Pre-Phase-5 Speaker", "ja")
+      .run();
+
+    await expect(getSpeakerProfile(env.DB, CHAT_ONE, USER_ONE)).resolves.toMatchObject({
+      displayName: "Pre-Phase-5 Speaker",
+      primaryLanguage: "ja",
+      observedTone: null,
+      observedEmojiUsage: null,
+    });
   });
 });
 
@@ -192,6 +223,119 @@ describe("speaker profiles repository", () => {
 
     await expect(
       insert.bind(CHAT_ONE, USER_ONE, "Duplicate Synthetic Speaker").run(),
+    ).rejects.toThrow();
+  });
+});
+
+describe("speaker profiles repository — Phase 5 observed style", () => {
+  it("returns null observed fields for a profile that predates any observation", async () => {
+    await upsertSpeakerProfile(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      displayName: "Synthetic Speaker",
+      primaryLanguage: "ja",
+    });
+
+    await expect(getSpeakerProfile(env.DB, CHAT_ONE, USER_ONE)).resolves.toMatchObject({
+      observedTone: null,
+      observedEmojiUsage: null,
+    });
+  });
+
+  it("inserts a fresh profile with observed style via upsertObservedSpeakerStyle", async () => {
+    await upsertObservedSpeakerStyle(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      displayName: "Synthetic Speaker",
+      primaryLanguage: "ja",
+      observedTone: "casual",
+      observedEmojiUsage: "light",
+    });
+
+    await expect(getSpeakerProfile(env.DB, CHAT_ONE, USER_ONE)).resolves.toMatchObject({
+      displayName: "Synthetic Speaker",
+      primaryLanguage: "ja",
+      observedTone: "casual",
+      observedEmojiUsage: "light",
+    });
+  });
+
+  it("replaces the observed style with the latest value on a second observation (no history kept)", async () => {
+    await upsertObservedSpeakerStyle(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      displayName: "Synthetic Speaker",
+      primaryLanguage: "ja",
+      observedTone: "casual",
+      observedEmojiUsage: "none",
+    });
+    await upsertObservedSpeakerStyle(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      displayName: "Synthetic Speaker",
+      primaryLanguage: "pt-br",
+      observedTone: "formal",
+      observedEmojiUsage: "frequent",
+    });
+
+    await expect(getSpeakerProfile(env.DB, CHAT_ONE, USER_ONE)).resolves.toMatchObject({
+      primaryLanguage: "pt-br",
+      observedTone: "formal",
+      observedEmojiUsage: "frequent",
+    });
+    const count = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM speaker_profiles WHERE chat_id = ?1 AND user_id = ?2",
+    )
+      .bind(CHAT_ONE, USER_ONE)
+      .first<number>("count");
+    expect(count).toBe(1);
+  });
+
+  it("keeps observed style separate across chats for the same user", async () => {
+    await upsertObservedSpeakerStyle(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      displayName: "Speaker in chat one",
+      primaryLanguage: "ja",
+      observedTone: "casual",
+      observedEmojiUsage: "none",
+    });
+    await upsertObservedSpeakerStyle(env.DB, {
+      chatId: CHAT_TWO,
+      userId: USER_ONE,
+      displayName: "Speaker in chat two",
+      primaryLanguage: "pt-br",
+      observedTone: "formal",
+      observedEmojiUsage: "frequent",
+    });
+
+    await expect(getSpeakerProfile(env.DB, CHAT_ONE, USER_ONE)).resolves.toMatchObject({
+      observedTone: "casual",
+      observedEmojiUsage: "none",
+    });
+    await expect(getSpeakerProfile(env.DB, CHAT_TWO, USER_ONE)).resolves.toMatchObject({
+      observedTone: "formal",
+      observedEmojiUsage: "frequent",
+    });
+  });
+
+  it("rejects an invalid observed_tone at the SQL boundary", async () => {
+    await expect(
+      env.DB.prepare(
+        "INSERT INTO speaker_profiles (chat_id, user_id, display_name, observed_tone) VALUES (?1, ?2, ?3, ?4)",
+      )
+        .bind(CHAT_ONE, USER_ONE, "Synthetic Speaker", "very-casual")
+        .run(),
+    ).rejects.toThrow();
+  });
+
+  it("rejects an invalid observed_emoji_usage at the SQL boundary", async () => {
+    await expect(
+      env.DB.prepare(
+        "INSERT INTO speaker_profiles (chat_id, user_id, display_name, observed_emoji_usage) VALUES (?1, ?2, ?3, ?4)",
+      )
+        .bind(CHAT_ONE, USER_ONE, "Synthetic Speaker", "lots")
+        .run(),
     ).rejects.toThrow();
   });
 });

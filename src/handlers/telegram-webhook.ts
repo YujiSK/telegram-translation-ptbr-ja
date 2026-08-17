@@ -1,7 +1,17 @@
 import { validateAppConfig } from "../config/app-config";
 import { translateAndReply } from "../application/translate-and-reply";
+import {
+  resolveEffectiveSpeakerMemory,
+  selectApplicableCorrections,
+} from "../domain/speaker-memory";
 import { isChatAllowed } from "../infrastructure/d1/allowed-chats";
 import { recordUpdateIfNew, releaseProcessedUpdate } from "../infrastructure/d1/processed-updates";
+import { getSpeakerPreferences } from "../infrastructure/d1/speaker-preferences";
+import {
+  getSpeakerProfile,
+  upsertObservedSpeakerStyle,
+} from "../infrastructure/d1/speaker-profiles";
+import { listTranslationCorrections } from "../infrastructure/d1/translation-corrections";
 import { sendMessage } from "../infrastructure/telegram/send-message";
 import { translateMessage } from "../infrastructure/openai/translate";
 import { parseTelegramUpdate } from "../infrastructure/telegram/parse-update";
@@ -16,11 +26,17 @@ import { TransientUpstreamError } from "../shared/errors";
  * read, JSON parse, or D1 access; unsupported updates and the bot's own
  * messages are dropped before any D1 access at all; the allowlist check
  * (a D1 read) happens before the dedupe record (a D1 write); the dedupe
- * record happens before the message-length check and the OpenAI/Telegram
- * work, so a redelivered duplicate never re-triggers either — see
- * "Dedupe and retry after a transient failure" in docs/architecture.md
- * for why a transient OpenAI/Telegram failure releases the dedupe
- * reservation but a permanent one does not.
+ * record happens before the message-length check and the speaker-memory/
+ * OpenAI/Telegram work, so a redelivered duplicate never re-triggers any
+ * of it — see "Dedupe and retry after a transient failure" in
+ * docs/architecture.md for why a transient OpenAI/Telegram failure
+ * releases the dedupe reservation but a permanent one does not.
+ *
+ * Speaker memory (Phase 5): read before the OpenAI call, written
+ * best-effort after a successful Telegram reply — see
+ * src/application/translate-and-reply.ts for the exact ordering and
+ * failure policy, and docs/architecture.md for why a memory-write
+ * failure never turns an already-sent reply into a 5xx.
  */
 
 type WebhookOutcome =
@@ -148,15 +164,46 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   }
 
   try {
-    // 10. The application use case: at most one logical OpenAI call, then
-    //     (only on a translated outcome) one Telegram reply.
+    // 10-13. The application use case: read speaker memory, at most one
+    //        logical OpenAI call, then (only on a translated outcome) one
+    //        Telegram reply and a best-effort observed-profile write.
     const outcome = await translateAndReply(update, {
+      memoryReader: {
+        readMemory: async ({ chatId, userId, sourceText }) => {
+          const [profile, explicit, corrections] = await Promise.all([
+            getSpeakerProfile(env.DB, chatId, userId),
+            getSpeakerPreferences(env.DB, chatId, userId),
+            listTranslationCorrections(env.DB, chatId, userId),
+          ]);
+          return resolveEffectiveSpeakerMemory({
+            observed: {
+              ...(profile?.observedTone != null ? { tone: profile.observedTone } : {}),
+              ...(profile?.observedEmojiUsage != null
+                ? { emojiUsage: profile.observedEmojiUsage }
+                : {}),
+            },
+            explicit,
+            corrections: selectApplicableCorrections(corrections, sourceText),
+          });
+        },
+      },
       translate: {
         translate: (translationRequest) =>
           translateMessage(translationRequest, { apiKey: openaiApiKey, model: config.openaiModel }),
       },
       reply: {
         sendMessage: (params) => sendMessage(params, { botToken: telegramBotToken }),
+      },
+      profileWriter: {
+        writeObservedProfile: (params) =>
+          upsertObservedSpeakerStyle(env.DB, {
+            chatId: params.chatId,
+            userId: params.userId,
+            displayName: params.displayName,
+            primaryLanguage: params.detectedLanguage,
+            observedTone: params.styleSignals.tone,
+            observedEmojiUsage: params.styleSignals.emojiUsage,
+          }),
       },
     });
 

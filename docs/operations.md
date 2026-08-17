@@ -19,7 +19,7 @@ possible yet.
 | Telegram BotFather                                     | Create the bot, obtain its token, set bot metadata                                                   |
 | OpenAI Platform                                        | API key management, usage/cost monitoring                                                            |
 
-## Not yet possible (as of Phase 4)
+## Not yet possible (as of Phase 5)
 
 - Deploying to Cloudflare (`wrangler deploy`) — no production Worker
   exists yet.
@@ -29,10 +29,13 @@ possible yet.
   since Phase 2, but `OPENAI_API_KEY`/`TELEGRAM_WEBHOOK_SECRET`/
   `TELEGRAM_BOT_TOKEN` are not).
 - Running `/status` in a real Telegram chat — no bot exists yet.
-- Exercising the webhook boundary or the OpenAI translation pipeline
-  against real traffic — both are implemented and tested locally against
-  mocked Telegram/OpenAI responses (Phases 3–4), but nothing external
-  points at either yet, and no real OpenAI API call has been made.
+- Applying `migrations/0002_speaker_memory.sql` to the remote database —
+  verified with `--local` only; a `--remote` apply is a Phase 8 action.
+- Exercising the webhook boundary, the OpenAI translation pipeline, or
+  speaker memory against real traffic — all are implemented and tested
+  locally against mocked Telegram/OpenAI responses and local D1
+  (Phases 3–5), but nothing external points at any of it yet, and no
+  real OpenAI/Telegram API call has been made.
 
 ## GitHub Codespaces
 

@@ -1,13 +1,17 @@
 # Implementation Plan
 
-**Current phase: Phase 4 completed; Phase 5 not started.** OpenAI
+**Current phase: Phase 5 completed; Phase 6 not started.** OpenAI
 translation local implementation: Completed. Structured Outputs mock
 tests: Completed. Telegram reply orchestration mock tests: Completed.
-Speaker memory: Not started. Real OpenAI API test: Not performed (all
-Phase 4 tests use a mocked OpenAI HTTP response, per design). Telegram
-Bot creation, Cloudflare Secret registration, Worker deployment, and
-Telegram webhook registration: Pending until Phase 8 — see Phase 3,
-Phase 4, and Phase 8 below.
+Speaker Memory local schema: Completed. Memory repository: Completed.
+Effective memory resolution: Completed. Prompt v2: Completed. Mock/local
+D1 tests: Completed. Remote `0002_speaker_memory.sql` migration: Pending
+until Phase 8. Real family profile data: Not stored (only synthetic
+fixtures exist in tests). Real OpenAI/Telegram API test: Not performed
+(all Phase 4/5 tests use a mocked OpenAI/Telegram HTTP response, per
+design). Telegram Bot creation, Cloudflare Secret registration, Worker
+deployment, and Telegram webhook registration: Pending until Phase 8 —
+see Phase 3, Phase 4, Phase 5, and Phase 8 below.
 
 Rule for every phase (see `docs/project-rules.md` rules 13–14): implement
 one phase at a time, verify with `npm run check` before moving to the
@@ -229,6 +233,23 @@ webhook registration remain Pending until Phase 8, unchanged from Phase 3.
 ---
 
 ## Phase 5 — Speaker memory
+
+**Status: completed.** Speaker Memory local schema: Completed (`migrations/0002_speaker_memory.sql`,
+applied and verified locally with `wrangler d1 migrations apply --local`
+— not applied remotely). Memory repository: Completed
+(`src/infrastructure/d1/{speaker-profiles,speaker-preferences,translation-corrections}.ts`).
+Effective memory resolution: Completed (`src/domain/speaker-memory.ts`,
+independently unit-tested — explicit-over-observed priority,
+`selectApplicableCorrections`). Prompt v2: Completed
+(`src/prompts/translation-v2.ts`, `translation-v1.ts` untouched and still
+independently tested). Mock/local D1 tests: Completed, `npm run check`
+green and CI green. Webhook integration
+(`src/handlers/telegram-webhook.ts`, `src/application/translate-and-reply.ts`):
+memory read before the OpenAI call, observed-style write best-effort
+after a successful Telegram reply — see `docs/architecture.md`. No real
+family profile data exists anywhere in this repository; every fixture
+used in tests is an obviously synthetic ID/term. No real OpenAI/Telegram
+API call has been made.
 
 - **目的:** Make translations reflect stored, per-speaker
   preferences/style, with explicit settings always overriding

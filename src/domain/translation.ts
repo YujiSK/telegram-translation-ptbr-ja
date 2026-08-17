@@ -1,5 +1,6 @@
 import type { Language, TranslationTargetLanguage } from "./language";
 import type { SpeakerIdentity } from "./speaker";
+import type { EffectiveSpeakerMemory } from "./speaker-memory";
 
 /**
  * Minimal reply-context shape. Per docs/architecture.md, at most one
@@ -14,6 +15,8 @@ export interface TranslationRequest {
   readonly sourceText: string;
   readonly speaker: SpeakerIdentity;
   readonly replyContext?: ReplyContext;
+  /** Optional since not every caller has speaker memory to offer (e.g. Phase 4 tests) — see docs/implementation-plan.md Phase 5. */
+  readonly memory?: EffectiveSpeakerMemory;
 }
 
 /**

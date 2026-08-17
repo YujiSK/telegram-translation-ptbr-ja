@@ -132,6 +132,30 @@ function requireStringBody(body: BodyInit | null | undefined): string {
   return body;
 }
 
+/**
+ * Extracts only the "user"-role message content from an OpenAI request
+ * body's `input` array — the developer instructions are fixed text that
+ * mentions section names like "SPEAKER STYLE PREFERENCE" generically
+ * (to explain the format), so a presence/absence assertion must look at
+ * the user message alone, not the whole serialized `input`.
+ */
+function userMessageContent(input: unknown): string {
+  if (!Array.isArray(input)) {
+    throw new Error("expected the OpenAI request body's input to be an array");
+  }
+  const userMessage = input.find(
+    (message): message is { role: string; content: string } =>
+      typeof message === "object" &&
+      message !== null &&
+      "role" in message &&
+      (message as { role: unknown }).role === "user",
+  );
+  if (userMessage === undefined) {
+    throw new Error("expected a user-role message in the OpenAI request body's input");
+  }
+  return userMessage.content;
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -164,6 +188,16 @@ function openAiTranslatedResponse(): Response {
   });
 }
 
+function openAiTranslatedPtBrToJaResponse(): Response {
+  return openAiStructuredResponse({
+    detectedLanguage: "pt-br",
+    action: "translate",
+    targetLanguage: "ja",
+    translatedText: "合成テストメッセージ",
+    styleSignals: { tone: "neutral", emojiUsage: "light" },
+  });
+}
+
 function openAiSkipResponse(): Response {
   return openAiStructuredResponse({
     detectedLanguage: "other",
@@ -178,8 +212,39 @@ function telegramSendMessageResponse(messageId = 999999001): Response {
   return jsonResponse({ ok: true, result: { message_id: messageId, chat: { id: CHAT_ID } } });
 }
 
+/**
+ * Fails D1 `.prepare()` only for statements whose SQL text contains
+ * `matchSubstring`, delegating everything else to the real local D1 — so
+ * a specific read or write can be made to fail (e.g. only the speaker
+ * memory read, not the allowlist/dedupe checks that must succeed first).
+ */
+function mockD1PrepareFailureFor(matchSubstring: string) {
+  const originalPrepare = env.DB.prepare.bind(env.DB);
+  return vi.spyOn(env.DB, "prepare").mockImplementation((query: string) => {
+    if (query.includes(matchSubstring)) {
+      throw new Error("synthetic D1 outage");
+    }
+    return originalPrepare(query);
+  });
+}
+
+async function getStoredProfile(
+  chatId: number,
+  userId: number,
+): Promise<Record<string, unknown> | null> {
+  const row = await env.DB.prepare(
+    "SELECT display_name, primary_language, observed_tone, observed_emoji_usage FROM speaker_profiles WHERE chat_id = ?1 AND user_id = ?2",
+  )
+    .bind(chatId, userId)
+    .first();
+  return row;
+}
+
 beforeEach(async () => {
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM speaker_preferences"),
+    env.DB.prepare("DELETE FROM translation_corrections"),
+    env.DB.prepare("DELETE FROM speaker_profiles"),
     env.DB.prepare("DELETE FROM processed_updates"),
     env.DB.prepare("DELETE FROM allowed_chats"),
   ]);
@@ -562,6 +627,322 @@ describe("POST /telegram/webhook — missing Secrets", () => {
   });
 });
 
+describe("POST /telegram/webhook — speaker memory: pt-br -> ja with no memory", () => {
+  it("translates a pt-br source message the same way with no stored memory", async () => {
+    await allowlistChat();
+    mockFetchDispatch({
+      openai: () => Promise.resolve(openAiTranslatedPtBrToJaResponse()),
+      telegram: () => Promise.resolve(telegramSendMessageResponse()),
+    });
+
+    const response = await callWorker(
+      webhookRequest(buildUpdate({ updateId: 930000030, text: "Oi, tudo bem?" })),
+      testEnv(),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ outcome: "translated" });
+  });
+});
+
+describe("POST /telegram/webhook — speaker memory: observed style is read and reflected in the prompt", () => {
+  it("includes the previously observed style in the OpenAI request as a soft hint", async () => {
+    await allowlistChat();
+    await env.DB.prepare(
+      "INSERT INTO speaker_profiles (chat_id, user_id, display_name, primary_language, observed_tone, observed_emoji_usage) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )
+      .bind(CHAT_ID, USER_ID, "Synthetic Speaker", "ja", "formal", "none")
+      .run();
+
+    const openaiHandler = vi.fn((_url: string, _init: RequestInit) =>
+      Promise.resolve(openAiTranslatedResponse()),
+    );
+    mockFetchDispatch({
+      openai: openaiHandler,
+      telegram: () => Promise.resolve(telegramSendMessageResponse()),
+    });
+
+    await callWorker(webhookRequest(buildUpdate({ updateId: 930000031 })), testEnv());
+
+    const call = openaiHandler.mock.calls[0];
+    if (call === undefined) {
+      throw new Error("expected the OpenAI handler to have been called");
+    }
+    const body = JSON.parse(requireStringBody(call[1]?.body)) as { input: unknown };
+    const serializedInput = JSON.stringify(body.input);
+    expect(serializedInput).toContain("SPEAKER STYLE PREFERENCE");
+    expect(serializedInput).toContain("tone: formal (observed)");
+    expect(serializedInput).toContain("emojiUsage: none (observed)");
+  });
+});
+
+describe("POST /telegram/webhook — speaker memory: explicit preference is read and reflected in the prompt", () => {
+  it("includes the explicit preference in the OpenAI request, taking priority over any observed style", async () => {
+    await allowlistChat();
+    await env.DB.prepare(
+      "INSERT INTO speaker_profiles (chat_id, user_id, display_name, primary_language, observed_tone, observed_emoji_usage) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )
+      .bind(CHAT_ID, USER_ID, "Synthetic Speaker", "ja", "casual", "frequent")
+      .run();
+    await env.DB.prepare(
+      "INSERT INTO speaker_preferences (chat_id, user_id, preference_key, preference_value) VALUES (?1, ?2, ?3, ?4)",
+    )
+      .bind(CHAT_ID, USER_ID, "tone", "formal")
+      .run();
+
+    const openaiHandler = vi.fn((_url: string, _init: RequestInit) =>
+      Promise.resolve(openAiTranslatedResponse()),
+    );
+    mockFetchDispatch({
+      openai: openaiHandler,
+      telegram: () => Promise.resolve(telegramSendMessageResponse()),
+    });
+
+    await callWorker(webhookRequest(buildUpdate({ updateId: 930000032 })), testEnv());
+
+    const call = openaiHandler.mock.calls[0];
+    if (call === undefined) {
+      throw new Error("expected the OpenAI handler to have been called");
+    }
+    const body = JSON.parse(requireStringBody(call[1]?.body)) as { input: unknown };
+    const serializedInput = JSON.stringify(body.input);
+    // Explicit tone (formal) wins over observed tone (casual); emojiUsage
+    // has no explicit preference, so it falls back to observed (frequent).
+    expect(serializedInput).toContain("tone: formal (explicit)");
+    expect(serializedInput).toContain("emojiUsage: frequent (observed)");
+  });
+});
+
+describe("POST /telegram/webhook — speaker memory: applicable corrections are read and reflected in the prompt", () => {
+  it("includes a correction whose source term appears in the message", async () => {
+    await allowlistChat();
+    await env.DB.prepare(
+      `INSERT INTO translation_corrections (chat_id, user_id, source_language, target_language, source_term, target_term)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+    )
+      .bind(CHAT_ID, USER_ID, "ja", "pt-br", "こんにちは", "synthetic-greeting")
+      .run();
+
+    const openaiHandler = vi.fn((_url: string, _init: RequestInit) =>
+      Promise.resolve(openAiTranslatedResponse()),
+    );
+    mockFetchDispatch({
+      openai: openaiHandler,
+      telegram: () => Promise.resolve(telegramSendMessageResponse()),
+    });
+
+    // buildUpdate()'s default text contains "こんにちは".
+    await callWorker(webhookRequest(buildUpdate({ updateId: 930000033 })), testEnv());
+
+    const call = openaiHandler.mock.calls[0];
+    if (call === undefined) {
+      throw new Error("expected the OpenAI handler to have been called");
+    }
+    const body = JSON.parse(requireStringBody(call[1]?.body)) as { input: unknown };
+    const serializedInput = JSON.stringify(body.input);
+    expect(serializedInput).toContain("KNOWN TERM CORRECTIONS");
+    expect(serializedInput).toContain("synthetic-greeting");
+  });
+
+  it("excludes a correction whose source term does not appear in the message", async () => {
+    await allowlistChat();
+    await env.DB.prepare(
+      `INSERT INTO translation_corrections (chat_id, user_id, source_language, target_language, source_term, target_term)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+    )
+      .bind(CHAT_ID, USER_ID, "ja", "pt-br", "synthetic-unrelated-term", "unrelated-rendering")
+      .run();
+
+    const openaiHandler = vi.fn((_url: string, _init: RequestInit) =>
+      Promise.resolve(openAiTranslatedResponse()),
+    );
+    mockFetchDispatch({
+      openai: openaiHandler,
+      telegram: () => Promise.resolve(telegramSendMessageResponse()),
+    });
+
+    await callWorker(webhookRequest(buildUpdate({ updateId: 930000034 })), testEnv());
+
+    const call = openaiHandler.mock.calls[0];
+    if (call === undefined) {
+      throw new Error("expected the OpenAI handler to have been called");
+    }
+    const body = JSON.parse(requireStringBody(call[1]?.body)) as { input: unknown };
+    const userContent = userMessageContent(body.input);
+    expect(userContent).not.toContain("KNOWN TERM CORRECTIONS");
+    expect(userContent).not.toContain("synthetic-unrelated-term");
+  });
+});
+
+describe("POST /telegram/webhook — speaker memory: scope isolation", () => {
+  it("does not leak observed style from another chat for the same user", async () => {
+    const otherChatId = -1008000000099;
+    await allowlistChat();
+    await allowlistChat(otherChatId);
+    await env.DB.prepare(
+      "INSERT INTO speaker_profiles (chat_id, user_id, display_name, primary_language, observed_tone, observed_emoji_usage) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )
+      .bind(otherChatId, USER_ID, "Synthetic Speaker", "ja", "formal", "none")
+      .run();
+
+    const openaiHandler = vi.fn((_url: string, _init: RequestInit) =>
+      Promise.resolve(openAiTranslatedResponse()),
+    );
+    mockFetchDispatch({
+      openai: openaiHandler,
+      telegram: () => Promise.resolve(telegramSendMessageResponse()),
+    });
+
+    await callWorker(
+      webhookRequest(buildUpdate({ updateId: 930000035, chatId: CHAT_ID })),
+      testEnv(),
+    );
+
+    const call = openaiHandler.mock.calls[0];
+    if (call === undefined) {
+      throw new Error("expected the OpenAI handler to have been called");
+    }
+    const body = JSON.parse(requireStringBody(call[1]?.body)) as { input: unknown };
+    expect(userMessageContent(body.input)).not.toContain("SPEAKER STYLE PREFERENCE");
+  });
+
+  it("does not leak observed style from another user in the same chat", async () => {
+    const otherUserId = 750000099;
+    await allowlistChat();
+    await env.DB.prepare(
+      "INSERT INTO speaker_profiles (chat_id, user_id, display_name, primary_language, observed_tone, observed_emoji_usage) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )
+      .bind(CHAT_ID, otherUserId, "Other Synthetic Speaker", "ja", "formal", "none")
+      .run();
+
+    const openaiHandler = vi.fn((_url: string, _init: RequestInit) =>
+      Promise.resolve(openAiTranslatedResponse()),
+    );
+    mockFetchDispatch({
+      openai: openaiHandler,
+      telegram: () => Promise.resolve(telegramSendMessageResponse()),
+    });
+
+    await callWorker(webhookRequest(buildUpdate({ updateId: 930000036 })), testEnv());
+
+    const call = openaiHandler.mock.calls[0];
+    if (call === undefined) {
+      throw new Error("expected the OpenAI handler to have been called");
+    }
+    const body = JSON.parse(requireStringBody(call[1]?.body)) as { input: unknown };
+    expect(userMessageContent(body.input)).not.toContain("SPEAKER STYLE PREFERENCE");
+  });
+});
+
+describe("POST /telegram/webhook — speaker memory: observed profile write after a successful translation", () => {
+  it("stores display name, detected language, observed tone, and observed emoji usage", async () => {
+    await allowlistChat();
+    mockFetchDispatch({
+      openai: () => Promise.resolve(openAiTranslatedResponse()),
+      telegram: () => Promise.resolve(telegramSendMessageResponse()),
+    });
+
+    const response = await callWorker(
+      webhookRequest(buildUpdate({ updateId: 930000037 })),
+      testEnv(),
+    );
+    expect(response.status).toBe(200);
+
+    await expect(getStoredProfile(CHAT_ID, USER_ID)).resolves.toMatchObject({
+      display_name: "Test User",
+      primary_language: "ja",
+      observed_tone: "casual",
+      observed_emoji_usage: "none",
+    });
+  });
+
+  it("overwrites a previously observed style with the latest observation (no history kept)", async () => {
+    await allowlistChat();
+    await env.DB.prepare(
+      "INSERT INTO speaker_profiles (chat_id, user_id, display_name, primary_language, observed_tone, observed_emoji_usage) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )
+      .bind(CHAT_ID, USER_ID, "Synthetic Speaker", "pt-br", "formal", "frequent")
+      .run();
+    mockFetchDispatch({
+      openai: () => Promise.resolve(openAiTranslatedResponse()),
+      telegram: () => Promise.resolve(telegramSendMessageResponse()),
+    });
+
+    await callWorker(webhookRequest(buildUpdate({ updateId: 930000038 })), testEnv());
+
+    await expect(getStoredProfile(CHAT_ID, USER_ID)).resolves.toMatchObject({
+      primary_language: "ja",
+      observed_tone: "casual",
+      observed_emoji_usage: "none",
+    });
+  });
+
+  it("never writes an observed profile for a too-long message", async () => {
+    await allowlistChat();
+    const fetchSpy = mockFetchDispatch({});
+    const tooLongText = "あ".repeat(2001);
+
+    await callWorker(
+      webhookRequest(buildUpdate({ updateId: 930000039, text: tooLongText })),
+      testEnv(),
+    );
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    await expect(getStoredProfile(CHAT_ID, USER_ID)).resolves.toBeNull();
+  });
+
+  it("never writes an observed profile for an untargeted-language (skip) outcome", async () => {
+    await allowlistChat();
+    mockFetchDispatch({ openai: () => Promise.resolve(openAiSkipResponse()) });
+
+    await callWorker(webhookRequest(buildUpdate({ updateId: 930000040 })), testEnv());
+
+    await expect(getStoredProfile(CHAT_ID, USER_ID)).resolves.toBeNull();
+  });
+});
+
+describe("POST /telegram/webhook — speaker memory: read failure", () => {
+  it("returns 500 without calling OpenAI or Telegram when the memory read fails", async () => {
+    await allowlistChat();
+    const prepareSpy = mockD1PrepareFailureFor("FROM speaker_profiles WHERE chat_id");
+    const fetchSpy = mockFetchDispatch({});
+
+    try {
+      const response = await callWorker(
+        webhookRequest(buildUpdate({ updateId: 930000041 })),
+        testEnv(),
+      );
+      expect(response.status).toBe(500);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      prepareSpy.mockRestore();
+    }
+  });
+});
+
+describe("POST /telegram/webhook — speaker memory: write failure never turns a sent reply into a failure", () => {
+  it("returns 200 translated and keeps the dedupe reservation when only the profile write fails", async () => {
+    await allowlistChat();
+    const updateId = 930000042;
+    const prepareSpy = mockD1PrepareFailureFor("INSERT INTO speaker_profiles");
+    mockFetchDispatch({
+      openai: () => Promise.resolve(openAiTranslatedResponse()),
+      telegram: () => Promise.resolve(telegramSendMessageResponse()),
+    });
+
+    try {
+      const response = await callWorker(webhookRequest(buildUpdate({ updateId })), testEnv());
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({ outcome: "translated" });
+      await expect(isUpdateRecorded(updateId)).resolves.toBe(true);
+      await expect(getStoredProfile(CHAT_ID, USER_ID)).resolves.toBeNull();
+    } finally {
+      prepareSpy.mockRestore();
+    }
+  });
+});
+
 describe("existing routes are unaffected by the webhook boundary", () => {
   it("GET /health still returns 200 with the expected body", async () => {
     const response = await callWorker(new Request("https://example.com/health"), testEnv());
@@ -571,6 +952,14 @@ describe("existing routes are unaffected by the webhook boundary", () => {
       status: "ok",
       service: "telegram-translation-ptbr-ja",
     });
+  });
+
+  it("POST /health returns 404 (not the health handler)", async () => {
+    const response = await callWorker(
+      new Request("https://example.com/health", { method: "POST" }),
+      testEnv(),
+    );
+    expect(response.status).toBe(404);
   });
 
   it("unknown paths still return 404", async () => {

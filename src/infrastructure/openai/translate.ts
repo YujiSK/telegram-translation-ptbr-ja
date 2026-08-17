@@ -12,8 +12,8 @@ import { PermanentUpstreamError } from "../../shared/errors";
 import {
   TRANSLATION_JSON_SCHEMA,
   TRANSLATION_JSON_SCHEMA_NAME,
-  buildTranslationInput,
 } from "../../prompts/translation-v1";
+import { buildTranslationInputV2 } from "../../prompts/translation-v2";
 import { callOpenAiResponses, type OpenAiApiCallOptions } from "./client";
 
 /**
@@ -193,9 +193,10 @@ export async function translateMessage(
   request: TranslationRequest,
   options: TranslateMessageOptions,
 ): Promise<TranslationOutcome> {
-  const input = buildTranslationInput({
+  const input = buildTranslationInputV2({
     sourceText: request.sourceText,
     ...(request.replyContext !== undefined ? { replyContextText: request.replyContext.text } : {}),
+    ...(request.memory !== undefined ? { memory: request.memory } : {}),
   });
 
   const body: Record<string, unknown> = {

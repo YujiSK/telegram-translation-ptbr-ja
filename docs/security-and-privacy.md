@@ -118,6 +118,15 @@ one reply-context message, no stored profile data beyond what's needed to
 express an explicit preference (e.g., "translate casually") — never raw
 personal data about the speaker.
 
+**Implemented (Phase 5):** the same request may also include the
+speaker's already-resolved style preference (`tone`, `emojiUsage` — one
+value per axis, never both an explicit and an observed value at once)
+and up to 20 term corrections whose source term literally appears in the
+current message (`src/prompts/translation-v2.ts`,
+`src/domain/speaker-memory.ts` `selectApplicableCorrections`). Never sent
+to OpenAI: the speaker's display name, Telegram user ID, chat ID, or any
+correction/preference belonging to a different `(chat_id, user_id)`.
+
 ## Cost / usage runaway prevention
 
 Planned for Phase 7, tracked here so it isn't lost:

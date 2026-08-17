@@ -1,10 +1,18 @@
 # Data Model
 
-Status: **Phase 2 schema implemented.** `migrations/0001_initial.sql` creates
-`allowed_chats`, `processed_updates`, and `speaker_profiles` for local
-development and tests. The remote D1 database is provisioned and configured,
-and `0001_initial.sql` was applied remotely on 2026-08-14. The other tables
-remain plans for the later phases that own their behavior.
+Status: **Phase 2 and Phase 5 schema implemented.**
+`migrations/0001_initial.sql` creates `allowed_chats`, `processed_updates`,
+and `speaker_profiles` for local development and tests. The remote D1
+database is provisioned and configured, and `0001_initial.sql` was
+applied remotely on 2026-08-14. `migrations/0002_speaker_memory.sql`
+(Phase 5) adds `observed_tone`/`observed_emoji_usage` to
+`speaker_profiles` and creates `speaker_preferences` and
+`translation_corrections` — verified with
+`wrangler d1 migrations apply --local` and by the Workers Vitest test
+suite (`test/infrastructure/d1/{repositories,speaker-memory-repositories}.test.ts`),
+but **not** applied to the remote database (that's Phase 8). The
+remaining tables below stay plans for the later phases that own their
+behavior.
 
 General privacy rule for every table below: **never store message text,
 full OpenAI prompts, or Secrets.** See `docs/security-and-privacy.md` for
@@ -37,12 +45,17 @@ used to make translations feel natural for that person.
   a style/preference learned in one family group has no effect on
   another group, even for the same Telegram user.
 - **Implemented columns:** `chat_id`, Telegram `user_id`, display name,
-  nullable primary language, `created_at`, `updated_at`
-- **Deferred low-risk fields:** emoji usage and casual/formal signals.
-  Phase 4 defines their shape (`StyleSignals` — `tone`, `emojiUsage`,
-  produced by the same OpenAI call as the translation) but does not
-  persist them anywhere; no column for them exists until Phase 5 defines
-  the memory read/write behavior that owns them.
+  nullable primary language, nullable `observed_tone`, nullable
+  `observed_emoji_usage`, `created_at`, `updated_at`
+- **Implemented (Phase 5):** `observed_tone` (`casual`|`neutral`|`formal`)
+  and `observed_emoji_usage` (`none`|`light`|`frequent`), added by
+  `migrations/0002_speaker_memory.sql` as nullable columns with a SQLite
+  `CHECK` constraint each. These hold only the **single latest**
+  auto-observed style signal from the most recent successful
+  translation — never a history, never a score, never free text. Written
+  by `upsertObservedSpeakerStyle` (`src/infrastructure/d1/speaker-profiles.ts`)
+  from the same OpenAI response that already produced the translation
+  (Phase 4's `StyleSignals`), with no second API call.
 - **Must not store:** any inferred personality, health, political,
   religious, or relationship-status data; conversation content
 - **Retention:** until the user issues `/forgetme` or an admin removes
@@ -54,47 +67,74 @@ used to make translations feel natural for that person.
 
 ## `speaker_preferences`
 
-**Implementation status:** deferred to Phase 5/6. Its keys and command
-semantics remain open, so the Phase 2 migration intentionally does not
-freeze a premature schema.
-
-**Purpose:** Explicit, user- or admin-set translation preferences that
+**Implementation status:** Phase 5 schema implemented
+(`migrations/0002_speaker_memory.sql`); the `/remember`/`/forget` command
+surface that writes to it in normal operation is deferred to Phase 6 —
+Phase 5's own tests insert/read rows directly. Explicit preferences
 always take priority over auto-derived features from `speaker_profiles`
 (see `docs/security-and-privacy.md` — explicit settings outrank inferred
 ones).
 
-- **Planned primary key:** `(chat_id, user_id, preference_key)` or a
-  surrogate `id` with a unique constraint on that triple
-- **May store:** preference key/value pairs (e.g., target tone), who set
-  it (`self` vs. admin `user_id`), `created_at`, `updated_at`
-- **Must not store:** free-text explanations beyond what `/remember`
-  explicitly captures as a setting value
+- **Implemented primary key:** `(chat_id, user_id, preference_key)`.
+- **Implemented columns:** `chat_id`, `user_id`, `preference_key`,
+  `preference_value`, `created_at`, `updated_at`.
+- **Implemented constraint — fixed enum, not free-form key/value:** a
+  single SQLite `CHECK` pins each allowed `preference_key` to its own
+  allowed `preference_value` set, so an invalid key or an
+  invalid-for-that-key value can never be written:
+  - `preference_key = 'tone'` → `preference_value` in `casual`|`neutral`|`formal`
+  - `preference_key = 'emoji_usage'` → `preference_value` in `none`|`light`|`frequent`
+- **Must not store:** free-text explanations, who set it (setter/admin
+  identity) — deliberately not added in Phase 5 (privacy minimization);
+  Phase 6 can add an audit field in its own migration if a concrete need
+  arises.
 - **Retention:** until removed via `/forget` (single key) or `/forgetme`
-  (all of a user's data)
-- **Index candidates:** primary key / unique constraint above
-- **Open questions:** fixed enum of preference keys vs. free-form
-  key/value; how `/remember` vs. `/forget` map to key granularity
+  (all of a user's data) — both Phase 6.
+- **Index candidates:** primary key lookup above (small table).
 
 ## `translation_corrections`
 
-**Implementation status:** deferred to Phase 5/6, where correction scope,
-conflict resolution, and removal behavior are defined.
+**Implementation status:** Phase 5 schema implemented
+(`migrations/0002_speaker_memory.sql`); the `/correct` command that
+writes to it in normal operation is deferred to Phase 6 — Phase 5's own
+tests insert/read rows directly, using only synthetic term pairs.
 
-**Purpose:** User-submitted correction dictionary from `/correct`, applied
-to future translations (e.g., preferred renderings of names, in-jokes).
+**Purpose:** A short term/phrase correction dictionary — never a message
+or translation archive — applied to future translations (e.g., preferred
+renderings of names, in-jokes).
 
-- **Planned primary key:** surrogate `id`, unique on
-  `(chat_id, source_text, target_language)` or similar
-- **May store:** the corrected term/phrase pair, language direction,
-  which user submitted it, `created_at`, `updated_at`
+- **Implemented scope decision:** `(chat_id, user_id)` — a correction is
+  private to the user who made it, within the chat it was made in. It is
+  never shared with other users automatically, and never shared across
+  chats, even for the same user.
+- **Implemented primary key:**
+  `(chat_id, user_id, source_language, target_language, source_term)`.
+  Re-submitting the same source term in the same direction for the same
+  `(chat_id, user_id)` updates `target_term` in place (upsert) rather
+  than creating a second row — this is the schema's conflict-resolution
+  mechanism; no separate merge logic exists.
+- **Implemented columns:** `chat_id`, `user_id`, `source_language`,
+  `target_language`, `source_term`, `target_term`, `created_at`,
+  `updated_at`.
+- **Implemented constraint — direction:** a `CHECK` allows only
+  `ja → pt-br` or `pt-br → ja`; a same-language pair or an `other`
+  direction is rejected at the SQL boundary.
+- **Implemented constraint — term length:** `source_term` and
+  `target_term` must each be non-empty after `trim()` and at most 100
+  characters. 100 is a conservative ceiling for a name, nickname, or
+  short fixed phrase — generous enough for real corrections, small
+  enough to make storing an entire message here structurally impossible.
+  If a future phase needs a different ceiling, change the `CHECK` in a
+  new migration and document the reason there.
 - **Must not store:** the full original message the correction came from
-  — only the specific term/phrase pair being corrected
+  — only the specific term/phrase pair being corrected.
 - **Retention:** until removed (mechanism TBD — likely `/forget` extended
-  to cover corrections, or a dedicated command; **open question**)
-- **Index candidates:** lookup by `chat_id` + source term at translation
-  time
-- **Open questions:** whether corrections are per-chat or per-user;
-  removal command/UX; how conflicting corrections are resolved
+  to cover corrections, or a dedicated command; **open question**, Phase 6).
+- **Index candidates:** the primary key above already supports the
+  Phase 5 read pattern (all corrections for a `(chat_id, user_id)`,
+  optionally filtered by direction, ordered by `updated_at DESC,
+source_term ASC` — see `listTranslationCorrections` in
+  `src/infrastructure/d1/translation-corrections.ts`).
 
 ## `processed_updates`
 
@@ -151,10 +191,54 @@ markers).
 - **Open questions:** whether per-chat `/enable` and `/disable` belong
   here or fully in `allowed_chats.enabled`
 
+## Phase 5 speaker-memory design decisions (summary)
+
+Recorded here so they don't have to be re-derived from the migration or
+code later:
+
+- **`speaker_profiles` scope:** `(chat_id, user_id)` — unchanged since
+  Phase 2, now also the scope for the auto-observed `observed_tone`/
+  `observed_emoji_usage` columns.
+- **`speaker_preferences` scope:** `(chat_id, user_id, preference_key)`
+  — same per-chat, per-user scoping as `speaker_profiles`, plus the key.
+- **`translation_corrections` scope:** `(chat_id, user_id)` — a
+  correction is private to the user who made it, within one chat; never
+  auto-shared across users or chats.
+- **`speaker_preferences` keys are a fixed enum** (`tone`, `emoji_usage`
+  today), each with its own fixed allowed-value enum, enforced by a
+  SQLite `CHECK` — never a free-form key/value store.
+- **`translation_corrections` holds only short term/phrase pairs** —
+  never a full message or a full translation, enforced by a 100-character
+  `CHECK` on both `source_term` and `target_term`.
+- **Explicit preference always outranks observed style**, resolved
+  per-axis (`tone`, `emojiUsage` independently) by
+  `resolveEffectiveSpeakerMemory` in `src/domain/speaker-memory.ts` — see
+  `docs/architecture.md`, "Key design constraints".
+- **Corrections are a separate axis from style preference** — never
+  merged into the same explicit-vs-observed priority resolution; applied
+  only on a literal source-term match plus a matching language direction.
+- **`observed_tone`/`observed_emoji_usage` hold only the latest
+  observation, never a history** — each write via
+  `upsertObservedSpeakerStyle` fully replaces the previous value; no
+  observation-log table exists or is planned.
+- **The Phase 5 migration (`0002_speaker_memory.sql`) has not been
+  applied to the remote database** — only verified locally
+  (`wrangler d1 migrations apply --local`) and by the Workers Vitest
+  suite. Applying it remotely is a Phase 8 action.
+- **Deletion commands** (`/forget`, `/forgetme`, and a
+  correction-specific removal mechanism) are deferred to Phase 6 — Phase
+  5 only implements the read/write repository functions Phase 6's
+  commands will call.
+- **Reliability/observability hardening** (e.g. making a swallowed
+  observed-profile-write failure operator-visible, retention policies)
+  is deferred to Phase 7 — see `docs/architecture.md`, "Speaker memory
+  read/write ordering".
+
 ## Migration policy
 
-The first migration is `migrations/0001_initial.sql`. Future migrations
-are created with:
+The first migration is `migrations/0001_initial.sql`; the second is
+`migrations/0002_speaker_memory.sql` (Phase 5). Future migrations are
+created with:
 
 ```sh
 npx wrangler d1 migrations create <database-name> <description>
@@ -164,4 +248,6 @@ This creates a numbered `.sql` file per Cloudflare's D1 migration workflow
 (https://developers.cloudflare.com/d1/reference/migrations/). Migrations
 are applied with `wrangler d1 migrations apply` (`--local` for local dev,
 `--remote` for the deployed database) — not run manually against
-production.
+production. `0002_speaker_memory.sql` has been applied and tested with
+`--local` only; a `--remote` apply requires the same explicit approval as
+any other Phase 8 action.

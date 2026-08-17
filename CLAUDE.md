@@ -8,14 +8,19 @@ D1 for speaker memory. See `README.md` for the full picture.
 
 ## Current phase
 
-**Phase 4 completed; Phase 5 not started.** The local webhook boundary,
+**Phase 5 completed; Phase 6 not started.** The local webhook boundary,
 Secret verification, allowlist/dedupe wiring, OpenAI translation (a single
-Structured Outputs call per message), and the Telegram reply are
-implemented and tested against mocked OpenAI/Telegram responses — no real
-OpenAI API call has been made. Speaker memory (Phase 5) has not started.
-Telegram bot creation, Secret registration, Worker deployment, and
-webhook registration remain Phase 8 actions; do not perform them without
-an explicit go-ahead. See `docs/implementation-plan.md` for the
+Structured Outputs call per message), the Telegram reply, and speaker
+memory (per-`(chat_id, user_id)` observed style, explicit preferences,
+and term corrections, resolved explicit-over-observed and folded into
+the OpenAI prompt with no second API call) are implemented and tested
+against mocked OpenAI/Telegram responses and local D1 — no real
+OpenAI/Telegram API call has been made, and the Phase 5 migration
+(`migrations/0002_speaker_memory.sql`) has been applied only locally, not
+to the remote database. Commands (Phase 6) have not started. Telegram bot
+creation, Secret registration, Worker deployment, webhook registration,
+and the remote `0002` migration remain Phase 8 actions; do not perform
+them without an explicit go-ahead. See `docs/implementation-plan.md` for the
 authoritative status.
 
 ## Always read before working
