@@ -332,6 +332,72 @@ describe("translateMessage — malformed / inconsistent responses are never retr
       }),
     );
   });
+
+  // Phase 5 review, Issue 6: a targeted translation success with a null
+  // styleSignals must never be treated as valid — Phase 5 records the
+  // observed style from this exact response, with no second OpenAI call,
+  // so a "translate now, observe later" partial success would silently
+  // skip the profile write forever for that message.
+  it("rejects detectedLanguage=ja + action=translate with a null styleSignals", async () => {
+    await expectPermanentFailure(
+      fetchReturning({
+        detectedLanguage: "ja",
+        action: "translate",
+        targetLanguage: "pt-br",
+        translatedText: "x",
+        styleSignals: null,
+      }),
+    );
+  });
+
+  it("rejects detectedLanguage=pt-br + action=translate with a null styleSignals", async () => {
+    await expectPermanentFailure(
+      fetchReturning({
+        detectedLanguage: "pt-br",
+        action: "translate",
+        targetLanguage: "ja",
+        translatedText: "x",
+        styleSignals: null,
+      }),
+    );
+  });
+
+  it("rejects detectedLanguage=other + action=skip with a non-null styleSignals", async () => {
+    await expectPermanentFailure(
+      fetchReturning({
+        detectedLanguage: "other",
+        action: "skip",
+        targetLanguage: null,
+        translatedText: null,
+        styleSignals: { tone: "casual", emojiUsage: "none" },
+      }),
+    );
+  });
+});
+
+describe("translateMessage — Issue 6 valid boundary: other + skip + null styleSignals", () => {
+  it("still succeeds as a skipped outcome", async () => {
+    const fetchFn = fetchReturning({
+      detectedLanguage: "other",
+      action: "skip",
+      targetLanguage: null,
+      translatedText: null,
+      styleSignals: null,
+    });
+
+    const outcome = await translateMessage(baseRequest, {
+      apiKey: API_KEY,
+      model: MODEL,
+      fetchFn,
+      waitFn: noopWait,
+    });
+
+    expect(outcome).toEqual({
+      kind: "skipped",
+      detectedLanguage: "other",
+      reason: "untargeted-language",
+    });
+  });
 });
 
 describe("translateMessage — transient upstream failures propagate as retryable", () => {

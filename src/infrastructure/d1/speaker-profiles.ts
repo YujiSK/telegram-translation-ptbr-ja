@@ -1,6 +1,12 @@
 import type { Language } from "../../domain/language";
 import type { EmojiUsage, StyleTone } from "../../domain/speaker-memory";
-import { invalidD1Row, isNonEmptyString, isRecord, isSafeInteger } from "./row-validation";
+import {
+  invalidD1Row,
+  isNonEmptyString,
+  isRecord,
+  isSafeInteger,
+  runD1Query,
+} from "./row-validation";
 
 export interface SpeakerProfile {
   readonly chatId: number;
@@ -77,12 +83,14 @@ export async function getSpeakerProfile(
   chatId: number,
   userId: number,
 ): Promise<SpeakerProfile | null> {
-  const row = await db
-    .prepare(
-      "SELECT chat_id, user_id, display_name, primary_language, observed_tone, observed_emoji_usage, created_at, updated_at FROM speaker_profiles WHERE chat_id = ?1 AND user_id = ?2 LIMIT 1",
-    )
-    .bind(chatId, userId)
-    .first();
+  const row = await runD1Query(() =>
+    db
+      .prepare(
+        "SELECT chat_id, user_id, display_name, primary_language, observed_tone, observed_emoji_usage, created_at, updated_at FROM speaker_profiles WHERE chat_id = ?1 AND user_id = ?2 LIMIT 1",
+      )
+      .bind(chatId, userId)
+      .first(),
+  );
 
   return row === null ? null : parseSpeakerProfile(row);
 }

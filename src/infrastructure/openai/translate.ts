@@ -138,15 +138,26 @@ function parseStructuredOutput(rawText: string): StructuredOutputPayload {
   return { detectedLanguage, action, targetLanguage, translatedText, styleSignals };
 }
 
-/** Cross-field logical consistency the JSON Schema alone can't express — see docs/implementation-plan.md Stage E. */
+/**
+ * Cross-field logical consistency the JSON Schema alone can't express —
+ * see docs/implementation-plan.md Stage E. Phase 5 review, Issue 6:
+ * `styleSignals` must be present (non-null) for every targeted
+ * translation, since Phase 5 records the observed style from this exact
+ * response with no second OpenAI call — a `translate` action with a
+ * `null` styleSignals is malformed, never a "translate now, observe
+ * later" partial success.
+ */
 function validateLogicalConsistency(payload: StructuredOutputPayload): void {
   if (payload.detectedLanguage === "other") {
     if (
       payload.action !== "skip" ||
       payload.targetLanguage !== null ||
-      payload.translatedText !== null
+      payload.translatedText !== null ||
+      payload.styleSignals !== null
     ) {
-      malformed("detectedLanguage=other must have action=skip with null target/translation");
+      malformed(
+        "detectedLanguage=other must have action=skip with null target/translation/styleSignals",
+      );
     }
     return;
   }
@@ -157,9 +168,12 @@ function validateLogicalConsistency(payload: StructuredOutputPayload): void {
     payload.action !== "translate" ||
     payload.targetLanguage !== expectedTarget ||
     payload.translatedText === null ||
-    payload.translatedText.trim() === ""
+    payload.translatedText.trim() === "" ||
+    payload.styleSignals === null
   ) {
-    malformed("detectedLanguage=ja|pt-br must have a matching translate action and non-empty text");
+    malformed(
+      "detectedLanguage=ja|pt-br must have a matching translate action, non-empty text, and non-null styleSignals",
+    );
   }
 }
 

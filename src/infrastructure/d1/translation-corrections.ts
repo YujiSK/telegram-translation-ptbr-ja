@@ -1,6 +1,6 @@
 import type { TranslationTargetLanguage } from "../../domain/language";
 import type { TranslationCorrection } from "../../domain/speaker-memory";
-import { invalidD1Row, isNonEmptyString, isRecord } from "./row-validation";
+import { invalidD1Row, isNonEmptyString, isRecord, runD1Query } from "./row-validation";
 
 export interface UpsertTranslationCorrectionInput {
   readonly chatId: number;
@@ -11,17 +11,43 @@ export interface UpsertTranslationCorrectionInput {
   readonly targetTerm: string;
 }
 
+/** Matches the `CHECK (length(...) <= 100)` constraint in `migrations/0002_speaker_memory.sql`. */
+const MAX_CORRECTION_TERM_LENGTH = 100;
+
 function isTargetLanguage(value: unknown): value is TranslationTargetLanguage {
   return value === "ja" || value === "pt-br";
 }
 
-function parseCorrectionRow(row: unknown): TranslationCorrection {
+/** ja<->pt-br only — same-language pairs and "other" are never a valid correction direction. */
+function isValidDirection(
+  sourceLanguage: TranslationTargetLanguage,
+  targetLanguage: TranslationTargetLanguage,
+): boolean {
+  return (
+    (sourceLanguage === "ja" && targetLanguage === "pt-br") ||
+    (sourceLanguage === "pt-br" && targetLanguage === "ja")
+  );
+}
+
+function isValidTerm(value: unknown): value is string {
+  return isNonEmptyString(value) && value.length <= MAX_CORRECTION_TERM_LENGTH;
+}
+
+/**
+ * Validates a raw D1 row as defense-in-depth on top of the schema's own
+ * `CHECK` constraints (direction, term length) — see
+ * `migrations/0002_speaker_memory.sql` and docs/implementation-plan.md
+ * Phase 5 review, Issue 3-B. Exported for direct boundary-validation unit
+ * tests as well as internal use.
+ */
+export function parseCorrectionRow(row: unknown): TranslationCorrection {
   if (
     !isRecord(row) ||
     !isTargetLanguage(row.source_language) ||
     !isTargetLanguage(row.target_language) ||
-    !isNonEmptyString(row.source_term) ||
-    !isNonEmptyString(row.target_term)
+    !isValidDirection(row.source_language, row.target_language) ||
+    !isValidTerm(row.source_term) ||
+    !isValidTerm(row.target_term)
   ) {
     throw invalidD1Row("translation correction");
   }
@@ -35,8 +61,12 @@ function parseCorrectionRow(row: unknown): TranslationCorrection {
 
 /**
  * All corrections for a `(chat_id, user_id)`, optionally narrowed to one
- * language direction. Ordered deterministically (most recently updated
- * first, then `source_term`) so that capping/selection downstream — see
+ * language direction. Ordered fully deterministically — most recently
+ * updated first, then `source_language`, `target_language`, and
+ * `source_term` as stable tie-breakers, since two corrections in
+ * opposite directions can otherwise share both `updated_at` and
+ * `source_term` (see docs/implementation-plan.md Phase 5 review, Issue 4)
+ * — so that capping/selection downstream — see
  * `src/domain/speaker-memory.ts` `selectApplicableCorrections` — is
  * reproducible. Never filters by message content: that comparison
  * happens in a pure domain function, not in SQL, so message text never
@@ -51,20 +81,27 @@ export async function listTranslationCorrections(
     readonly targetLanguage: TranslationTargetLanguage;
   },
 ): Promise<TranslationCorrection[]> {
-  const statement =
-    direction === undefined
-      ? db
-          .prepare(
-            "SELECT source_language, target_language, source_term, target_term FROM translation_corrections WHERE chat_id = ?1 AND user_id = ?2 ORDER BY updated_at DESC, source_term ASC",
-          )
-          .bind(chatId, userId)
-      : db
-          .prepare(
-            "SELECT source_language, target_language, source_term, target_term FROM translation_corrections WHERE chat_id = ?1 AND user_id = ?2 AND source_language = ?3 AND target_language = ?4 ORDER BY updated_at DESC, source_term ASC",
-          )
-          .bind(chatId, userId, direction.sourceLanguage, direction.targetLanguage);
+  const orderBy =
+    "ORDER BY updated_at DESC, source_language ASC, target_language ASC, source_term ASC";
 
-  const result = await statement.all();
+  // `.prepare()`/`.bind()` are constructed *inside* the `runD1Query`
+  // callback (not before it), so a failure from either — not just from
+  // the final `.all()` — is also classified as transient.
+  const result = await runD1Query(() => {
+    const statement =
+      direction === undefined
+        ? db
+            .prepare(
+              `SELECT source_language, target_language, source_term, target_term FROM translation_corrections WHERE chat_id = ?1 AND user_id = ?2 ${orderBy}`,
+            )
+            .bind(chatId, userId)
+        : db
+            .prepare(
+              `SELECT source_language, target_language, source_term, target_term FROM translation_corrections WHERE chat_id = ?1 AND user_id = ?2 AND source_language = ?3 AND target_language = ?4 ${orderBy}`,
+            )
+            .bind(chatId, userId, direction.sourceLanguage, direction.targetLanguage);
+    return statement.all();
+  });
   return result.results.map(parseCorrectionRow);
 }
 

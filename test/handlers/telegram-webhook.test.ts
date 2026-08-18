@@ -228,6 +228,67 @@ function mockD1PrepareFailureFor(matchSubstring: string) {
   });
 }
 
+/**
+ * A minimal `D1PreparedStatement` fake that always resolves `.first()`/
+ * `.all()` with a fixed row, regardless of bind values — used to simulate
+ * a malformed (data-corrupted) D1 row, which a real `CHECK`-constrained
+ * INSERT can never actually produce. `.run()`/`.raw()` are never called
+ * by the code paths under test here.
+ */
+class FixedRowStatement implements D1PreparedStatement {
+  constructor(private readonly row: Record<string, unknown> | null) {}
+
+  bind(..._values: unknown[]): D1PreparedStatement {
+    return this;
+  }
+
+  first<T = unknown>(_colName: string): Promise<T | null>;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+  first(): Promise<unknown> {
+    return Promise.resolve(this.row);
+  }
+
+  run(): never {
+    throw new Error("FixedRowStatement.run() is not implemented in this test fake");
+  }
+
+  all<T = Record<string, unknown>>(): Promise<D1Result<T>> {
+    return Promise.resolve({
+      results: (this.row === null ? [] : [this.row]) as T[],
+      success: true,
+      meta: {
+        duration: 0,
+        size_after: 0,
+        rows_read: 0,
+        rows_written: 0,
+        last_row_id: 0,
+        changed_db: false,
+        changes: 0,
+      },
+    });
+  }
+
+  raw(): never {
+    throw new Error("FixedRowStatement.raw() is not implemented in this test fake");
+  }
+}
+
+/**
+ * Makes D1 `.prepare()` return a fixed (possibly malformed) row for
+ * statements whose SQL text contains `matchSubstring`, delegating
+ * everything else to the real local D1 — mirrors `mockD1PrepareFailureFor`
+ * but for "D1 succeeded, with bad data" instead of "D1 failed".
+ */
+function mockD1PrepareRowFor(matchSubstring: string, row: Record<string, unknown> | null) {
+  const originalPrepare = env.DB.prepare.bind(env.DB);
+  return vi.spyOn(env.DB, "prepare").mockImplementation((query: string) => {
+    if (query.includes(matchSubstring)) {
+      return new FixedRowStatement(row);
+    }
+    return originalPrepare(query);
+  });
+}
+
 async function getStoredProfile(
   chatId: number,
   userId: number,
@@ -916,6 +977,63 @@ describe("POST /telegram/webhook — speaker memory: read failure", () => {
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       prepareSpy.mockRestore();
+    }
+  });
+
+  // Phase 5 review, Issue 1: a transient D1 failure while reading speaker
+  // memory must release the dedupe reservation, exactly like a transient
+  // OpenAI/Telegram failure already does — otherwise Telegram's
+  // redelivery of the same update is misclassified as a duplicate and
+  // the message is never translated. See docs/architecture.md, "Speaker
+  // memory read/write ordering".
+  it("releases the dedupe reservation on a transient memory-read D1 failure, and a redelivery then succeeds", async () => {
+    await allowlistChat();
+    const updateId = 930000043;
+    const failingPrepare = mockD1PrepareFailureFor("FROM speaker_profiles WHERE chat_id");
+    const fetchSpy = mockFetchDispatch({});
+
+    const first = await callWorker(webhookRequest(buildUpdate({ updateId })), testEnv());
+    expect(first.status).toBe(500);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(false);
+    failingPrepare.mockRestore();
+
+    mockFetchDispatch({
+      openai: () => Promise.resolve(openAiTranslatedResponse()),
+      telegram: () => Promise.resolve(telegramSendMessageResponse()),
+    });
+    const second = await callWorker(webhookRequest(buildUpdate({ updateId })), testEnv());
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({ outcome: "translated" });
+  });
+
+  // Phase 5 review, Issue 1: a malformed (data-corrupted) D1 row is a
+  // *permanent* failure, distinct from a transient query failure — a
+  // real CHECK-constrained INSERT can never actually produce one, so
+  // this simulates D1 returning corrupted data via a fixed-row fake.
+  it("keeps the dedupe reservation on a malformed speaker-memory row (permanent failure)", async () => {
+    await allowlistChat();
+    const updateId = 930000044;
+    const malformedRowPrepare = mockD1PrepareRowFor("FROM speaker_profiles WHERE chat_id", {
+      chat_id: CHAT_ID,
+      user_id: USER_ID,
+      display_name: "Synthetic Speaker",
+      primary_language: "ja",
+      observed_tone: "super-formal", // invalid enum value — malformed row
+      observed_emoji_usage: null,
+      created_at: "2026-01-01 00:00:00",
+      updated_at: "2026-01-01 00:00:00",
+    });
+    const fetchSpy = mockFetchDispatch({});
+
+    try {
+      const response = await callWorker(webhookRequest(buildUpdate({ updateId })), testEnv());
+
+      expect(response.status).toBe(500);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      await expect(isUpdateRecorded(updateId)).resolves.toBe(true);
+    } finally {
+      malformedRowPrepare.mockRestore();
     }
   });
 });

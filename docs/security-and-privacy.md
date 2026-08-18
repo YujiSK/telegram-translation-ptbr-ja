@@ -168,6 +168,14 @@ either).
   Structured Output that fails schema/logical-consistency validation, or
   any 4xx other than 429 is a `PermanentUpstreamError` and is never
   retried, per `docs/project-rules.md` rule 7.
+- **Implemented (Phase 5):** speaker-memory reads
+  (`src/infrastructure/d1/speaker-profiles.ts`,
+  `speaker-preferences.ts`, `translation-corrections.ts`) classify a raw
+  D1 query/runtime failure as a `TransientUpstreamError` (`service:
+"d1"`) via the shared `runD1Query` wrapper, and a malformed row (one
+  that fails boundary validation) as a `PermanentUpstreamError`. See
+  `docs/architecture.md`'s dedupe-and-retry section for what this means
+  for a redelivered Telegram update.
 
 ## D1 / SQL injection
 

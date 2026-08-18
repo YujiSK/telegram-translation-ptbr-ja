@@ -94,6 +94,20 @@ webhook in, `handlers/` dispatches, `application/` orchestrates
 - **Speaker memory is scoped strictly to `(chat_id, user_id)`.** Never
   merged or shared across chats or users, and never inferred from a
   Telegram-wide profile — see `docs/data-model.md`.
+- **Prompt v2 tone priority, unambiguous:** `src/prompts/translation-v2.ts`
+  states this order explicitly, highest first: (1) accuracy and safety
+  for the current message; (2) the message's own clearly expressed tone
+  and communicative purpose — never overridden; (3) the speaker's
+  resolved style preference (already explicit-over-observed — the prompt
+  never sees two competing values, only the one
+  `resolveEffectiveSpeakerMemory` already picked), used only to choose
+  among multiple equally accurate, equally natural renderings; (4) a
+  natural, everyday default for a private family chat, absent any
+  preference. Earlier prompt text no longer hardcodes "always translate
+  casually" — that instruction made an explicit `formal` preference
+  structurally impossible to honor (Phase 5 review, Issue 2).
+  `translation-v1.ts` is unchanged and still reflects the pre-Phase-5
+  design.
 
 ## External dependency boundaries
 
@@ -156,8 +170,13 @@ rule 2.
 - If D1 is unavailable, the request fails safe (500): no translation is
   posted with stale/guessed speaker settings silently substituted for
   explicit ones. This includes a speaker-memory read failure: the
-  webhook never proceeds to the OpenAI/Telegram call in that case (see
-  "Speaker memory read/write ordering" below).
+  webhook never proceeds to the OpenAI/Telegram call in that case. A
+  **transient** D1 query/runtime failure (network hiccup, D1 outage,
+  timeout) during the read releases the dedupe reservation, exactly like
+  a transient OpenAI/Telegram failure, so a Telegram redelivery is
+  retried rather than misclassified as a duplicate; a **permanent**
+  failure — a malformed/data-corrupted row — keeps the reservation. See
+  "Speaker memory read/write ordering" below.
 - A speaker-memory **write** failure, after the Telegram reply already
   succeeded, is never treated as a request failure — the webhook still
   responds 200 `translated`, and the dedupe reservation is kept (not
@@ -180,7 +199,21 @@ written back best-effort, after the Telegram reply — see
    `resolveEffectiveSpeakerMemory`): a failure here propagates — the
    webhook responds 500 and never calls OpenAI or Telegram for this
    update. This is the same "fail safe, no guessed substitution" policy
-   as any other D1 failure.
+   as any other D1 failure. These three repository functions classify
+   the failure before it reaches the webhook (`runD1Query` in
+   `src/infrastructure/d1/row-validation.ts`): a raw query/runtime
+   failure (the D1 binding itself throwing — network hiccup, outage,
+   timeout) becomes a `TransientUpstreamError`, so the webhook's existing
+   `error instanceof TransientUpstreamError` check releases the dedupe
+   reservation exactly as it already does for a transient OpenAI/Telegram
+   failure — see "Dedupe and retry after a transient failure" below. A
+   malformed row (data that fails the row parser's own validation —
+   `invalidD1Row`) stays a `PermanentUpstreamError`, thrown _after_
+   `runD1Query` returns successfully, so the reservation is kept: a real
+   `CHECK`-constrained row can never actually be malformed, so this path
+   only exists as defense against future schema drift or direct D1
+   tampering, and there is no reason to expect a redelivery would ever
+   succeed against it.
 2. **Translate** and **reply**: unchanged from Phase 4 — a failure in
    either propagates and is never treated as success.
 3. **Write** (`upsertObservedSpeakerStyle`, only when the outcome is
@@ -219,10 +252,12 @@ requiring no schema change:
   via a parameterized `DELETE ... WHERE update_id = ?1`.
 - The webhook handler calls `releaseProcessedUpdate` **only** when the
   translate-and-reply flow throws a `TransientUpstreamError` — network
-  failure, timeout, OpenAI 429/5xx after retries are exhausted, or a
-  transient Telegram failure. A `PermanentUpstreamError` (malformed
-  OpenAI response, a permanent Telegram rejection) or a configuration
-  failure never releases the reservation.
+  failure, timeout, OpenAI 429/5xx after retries are exhausted, a
+  transient Telegram failure, or (Phase 5) a transient D1 failure while
+  reading speaker memory (see "Speaker memory read/write ordering"
+  above). A `PermanentUpstreamError` (malformed OpenAI response, a
+  permanent Telegram rejection, a malformed speaker-memory row) or a
+  configuration failure never releases the reservation.
 - The release itself is best-effort: if the `DELETE` also fails, the
   webhook still responds 500 (the request already failed regardless), it
   just cannot guarantee the redelivery will be retry-able.

@@ -3,7 +3,7 @@ import type {
   ExplicitSpeakerPreferences,
   StyleTone,
 } from "../../domain/speaker-memory";
-import { invalidD1Row, isNonEmptyString, isRecord } from "./row-validation";
+import { invalidD1Row, isNonEmptyString, isRecord, runD1Query } from "./row-validation";
 
 /**
  * Fixed enum of allowed preference keys — see `migrations/0002_speaker_memory.sql`,
@@ -31,12 +31,22 @@ function isEmojiUsage(value: string): value is EmojiUsage {
   return value === "none" || value === "light" || value === "frequent";
 }
 
-interface ParsedPreferenceRow {
-  readonly key: SpeakerPreferenceKey;
-  readonly value: string;
-}
+/**
+ * The row's key and its value, narrowed together so a value can never be
+ * paired with a key it doesn't belong to — see docs/implementation-plan.md
+ * Phase 5 review, Issue 3-A. A row whose `preference_value` is a
+ * non-empty string but not a member of *its own* `preference_key`'s enum
+ * (e.g. `tone = "super-formal"`, or a `tone` row carrying an
+ * `emoji_usage` value) is rejected here, never silently ignored — this
+ * is defense-in-depth on top of the schema's own `CHECK` constraint
+ * (`migrations/0002_speaker_memory.sql`), not a replacement for it.
+ */
+export type ParsedPreferenceRow =
+  | { readonly key: "tone"; readonly value: StyleTone }
+  | { readonly key: "emoji_usage"; readonly value: EmojiUsage };
 
-function parsePreferenceRow(row: unknown): ParsedPreferenceRow {
+/** Exported for direct boundary-validation unit tests as well as internal use. */
+export function parsePreferenceRow(row: unknown): ParsedPreferenceRow {
   if (
     !isRecord(row) ||
     !isPreferenceKey(row.preference_key) ||
@@ -44,7 +54,20 @@ function parsePreferenceRow(row: unknown): ParsedPreferenceRow {
   ) {
     throw invalidD1Row("speaker preference");
   }
-  return { key: row.preference_key, value: row.preference_value };
+
+  const key = row.preference_key;
+  const value = row.preference_value;
+  if (key === "tone") {
+    if (!isStyleTone(value)) {
+      throw invalidD1Row("speaker preference");
+    }
+    return { key: "tone", value };
+  }
+
+  if (!isEmojiUsage(value)) {
+    throw invalidD1Row("speaker preference");
+  }
+  return { key: "emoji_usage", value };
 }
 
 /**
@@ -58,19 +81,21 @@ export async function getSpeakerPreferences(
   chatId: number,
   userId: number,
 ): Promise<ExplicitSpeakerPreferences> {
-  const result = await db
-    .prepare(
-      "SELECT preference_key, preference_value FROM speaker_preferences WHERE chat_id = ?1 AND user_id = ?2",
-    )
-    .bind(chatId, userId)
-    .all();
+  const result = await runD1Query(() =>
+    db
+      .prepare(
+        "SELECT preference_key, preference_value FROM speaker_preferences WHERE chat_id = ?1 AND user_id = ?2",
+      )
+      .bind(chatId, userId)
+      .all(),
+  );
 
   const preferences: { tone?: StyleTone; emojiUsage?: EmojiUsage } = {};
   for (const raw of result.results) {
     const row = parsePreferenceRow(raw);
-    if (row.key === "tone" && isStyleTone(row.value)) {
+    if (row.key === "tone") {
       preferences.tone = row.value;
-    } else if (row.key === "emoji_usage" && isEmojiUsage(row.value)) {
+    } else {
       preferences.emojiUsage = row.value;
     }
   }
@@ -84,20 +109,19 @@ export async function getSpeakerPreference(
   userId: number,
   key: SpeakerPreferenceKey,
 ): Promise<string | null> {
-  const row = await db
-    .prepare(
-      "SELECT preference_value FROM speaker_preferences WHERE chat_id = ?1 AND user_id = ?2 AND preference_key = ?3 LIMIT 1",
-    )
-    .bind(chatId, userId, key)
-    .first();
+  const row = await runD1Query(() =>
+    db
+      .prepare(
+        "SELECT preference_key, preference_value FROM speaker_preferences WHERE chat_id = ?1 AND user_id = ?2 AND preference_key = ?3 LIMIT 1",
+      )
+      .bind(chatId, userId, key)
+      .first(),
+  );
 
   if (row === null) {
     return null;
   }
-  if (!isRecord(row) || !isNonEmptyString(row.preference_value)) {
-    throw invalidD1Row("speaker preference");
-  }
-  return row.preference_value;
+  return parsePreferenceRow(row).value;
 }
 
 /**

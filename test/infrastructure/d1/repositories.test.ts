@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { isChatAllowed } from "../../../src/infrastructure/d1/allowed-chats";
 import {
@@ -12,6 +12,7 @@ import {
   upsertObservedSpeakerStyle,
   upsertSpeakerProfile,
 } from "../../../src/infrastructure/d1/speaker-profiles";
+import { TransientUpstreamError } from "../../../src/shared/errors";
 
 const CHAT_ONE = -1009000000001;
 const CHAT_TWO = -1009000000002;
@@ -337,5 +338,21 @@ describe("speaker profiles repository — Phase 5 observed style", () => {
         .bind(CHAT_ONE, USER_ONE, "Synthetic Speaker", "lots")
         .run(),
     ).rejects.toThrow();
+  });
+
+  // Phase 5 review, Issue 1: a raw D1 query/runtime failure (not a
+  // malformed row) must be classified as transient and retryable, so the
+  // webhook's dedupe-reservation release logic can act on it.
+  it("classifies a raw D1 query failure as transient", async () => {
+    const prepareSpy = vi.spyOn(env.DB, "prepare").mockImplementation(() => {
+      throw new Error("synthetic D1 outage");
+    });
+    try {
+      await expect(getSpeakerProfile(env.DB, CHAT_ONE, USER_ONE)).rejects.toBeInstanceOf(
+        TransientUpstreamError,
+      );
+    } finally {
+      prepareSpy.mockRestore();
+    }
   });
 });

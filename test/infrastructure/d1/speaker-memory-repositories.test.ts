@@ -1,15 +1,18 @@
 import { env } from "cloudflare:workers";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   getSpeakerPreference,
   getSpeakerPreferences,
+  parsePreferenceRow,
   upsertSpeakerPreference,
 } from "../../../src/infrastructure/d1/speaker-preferences";
 import {
   listTranslationCorrections,
+  parseCorrectionRow,
   upsertTranslationCorrection,
 } from "../../../src/infrastructure/d1/translation-corrections";
+import { PermanentUpstreamError, TransientUpstreamError } from "../../../src/shared/errors";
 
 /**
  * All chat/user IDs and correction terms below are obviously synthetic.
@@ -180,6 +183,83 @@ describe("speaker preferences repository", () => {
         .bind(CHAT_ONE, 0, "tone", "casual")
         .run(),
     ).rejects.toThrow();
+  });
+
+  // Phase 5 review, Issue 1: a raw D1 query/runtime failure (not a
+  // malformed row) must be classified as transient and retryable.
+  it("classifies a raw D1 query failure as transient (getSpeakerPreferences)", async () => {
+    const prepareSpy = vi.spyOn(env.DB, "prepare").mockImplementation(() => {
+      throw new Error("synthetic D1 outage");
+    });
+    try {
+      await expect(getSpeakerPreferences(env.DB, CHAT_ONE, USER_ONE)).rejects.toBeInstanceOf(
+        TransientUpstreamError,
+      );
+    } finally {
+      prepareSpy.mockRestore();
+    }
+  });
+
+  it("classifies a raw D1 query failure as transient (getSpeakerPreference)", async () => {
+    const prepareSpy = vi.spyOn(env.DB, "prepare").mockImplementation(() => {
+      throw new Error("synthetic D1 outage");
+    });
+    try {
+      await expect(getSpeakerPreference(env.DB, CHAT_ONE, USER_ONE, "tone")).rejects.toBeInstanceOf(
+        TransientUpstreamError,
+      );
+    } finally {
+      prepareSpy.mockRestore();
+    }
+  });
+});
+
+describe("parsePreferenceRow — D1 row boundary validation (Phase 5 review, Issue 3-A)", () => {
+  it("accepts a valid tone row", () => {
+    expect(parsePreferenceRow({ preference_key: "tone", preference_value: "formal" })).toEqual({
+      key: "tone",
+      value: "formal",
+    });
+  });
+
+  it("accepts a valid emoji_usage row", () => {
+    expect(
+      parsePreferenceRow({ preference_key: "emoji_usage", preference_value: "frequent" }),
+    ).toEqual({ key: "emoji_usage", value: "frequent" });
+  });
+
+  it("rejects a tone value outside its enum (invalid preference enum)", () => {
+    expect(() =>
+      parsePreferenceRow({ preference_key: "tone", preference_value: "super-formal" }),
+    ).toThrow(PermanentUpstreamError);
+  });
+
+  it("rejects an emoji_usage value outside its enum", () => {
+    expect(() =>
+      parsePreferenceRow({ preference_key: "emoji_usage", preference_value: "lots" }),
+    ).toThrow(PermanentUpstreamError);
+  });
+
+  it("rejects a tone row carrying an emoji_usage-shaped value (mismatched key/value)", () => {
+    expect(() =>
+      parsePreferenceRow({ preference_key: "tone", preference_value: "frequent" }),
+    ).toThrow(PermanentUpstreamError);
+  });
+
+  it("rejects an emoji_usage row carrying a tone-shaped value (mismatched key/value)", () => {
+    expect(() =>
+      parsePreferenceRow({ preference_key: "emoji_usage", preference_value: "formal" }),
+    ).toThrow(PermanentUpstreamError);
+  });
+
+  it("rejects an unknown preference key", () => {
+    expect(() =>
+      parsePreferenceRow({ preference_key: "favorite_color", preference_value: "blue" }),
+    ).toThrow(PermanentUpstreamError);
+  });
+
+  it("rejects a non-record row", () => {
+    expect(() => parsePreferenceRow("not-a-record")).toThrow(PermanentUpstreamError);
   });
 });
 
@@ -501,5 +581,137 @@ describe("translation corrections repository", () => {
         targetTerm: "rendering",
       }),
     ).resolves.toBeUndefined();
+  });
+
+  // Phase 5 review, Issue 4: two corrections in opposite directions can
+  // share both `updated_at` and `source_term` — `updated_at DESC,
+  // source_term ASC` alone cannot order them deterministically.
+  it("orders opposite-direction corrections sharing the same updated_at and source_term deterministically", async () => {
+    await upsertTranslationCorrection(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      sourceLanguage: "pt-br",
+      targetLanguage: "ja",
+      sourceTerm: "ABC",
+      targetTerm: "pt-to-ja-rendering",
+    });
+    await upsertTranslationCorrection(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      sourceLanguage: "ja",
+      targetLanguage: "pt-br",
+      sourceTerm: "ABC",
+      targetTerm: "ja-to-pt-rendering",
+    });
+    await env.DB.prepare(
+      "UPDATE translation_corrections SET updated_at = ?1 WHERE chat_id = ?2 AND user_id = ?3",
+    )
+      .bind("2026-01-01 00:00:00", CHAT_ONE, USER_ONE)
+      .run();
+
+    const first = await listTranslationCorrections(env.DB, CHAT_ONE, USER_ONE);
+    const second = await listTranslationCorrections(env.DB, CHAT_ONE, USER_ONE);
+    const third = await listTranslationCorrections(env.DB, CHAT_ONE, USER_ONE);
+
+    expect(first).toHaveLength(2);
+    // source_language ASC ("ja" < "pt-br") breaks the tie — and every
+    // repeated call returns the exact same order.
+    expect(first.map((c) => c.sourceLanguage)).toEqual(["ja", "pt-br"]);
+    expect(second.map((c) => c.sourceLanguage)).toEqual(["ja", "pt-br"]);
+    expect(third.map((c) => c.sourceLanguage)).toEqual(["ja", "pt-br"]);
+  });
+
+  // Phase 5 review, Issue 1: a raw D1 query/runtime failure (not a
+  // malformed row) must be classified as transient and retryable.
+  it("classifies a raw D1 query failure as transient", async () => {
+    const prepareSpy = vi.spyOn(env.DB, "prepare").mockImplementation(() => {
+      throw new Error("synthetic D1 outage");
+    });
+    try {
+      await expect(listTranslationCorrections(env.DB, CHAT_ONE, USER_ONE)).rejects.toBeInstanceOf(
+        TransientUpstreamError,
+      );
+    } finally {
+      prepareSpy.mockRestore();
+    }
+  });
+});
+
+describe("parseCorrectionRow — D1 row boundary validation (Phase 5 review, Issue 3-B)", () => {
+  const validRow = {
+    source_language: "ja",
+    target_language: "pt-br",
+    source_term: "synthetic-term",
+    target_term: "synthetic-rendering",
+  };
+
+  it("accepts a valid ja -> pt-br row", () => {
+    expect(parseCorrectionRow(validRow)).toEqual({
+      sourceLanguage: "ja",
+      targetLanguage: "pt-br",
+      sourceTerm: "synthetic-term",
+      targetTerm: "synthetic-rendering",
+    });
+  });
+
+  it("accepts a valid pt-br -> ja row", () => {
+    expect(
+      parseCorrectionRow({ ...validRow, source_language: "pt-br", target_language: "ja" }),
+    ).toEqual({
+      sourceLanguage: "pt-br",
+      targetLanguage: "ja",
+      sourceTerm: "synthetic-term",
+      targetTerm: "synthetic-rendering",
+    });
+  });
+
+  it("rejects a same-language direction (ja -> ja)", () => {
+    expect(() => parseCorrectionRow({ ...validRow, target_language: "ja" })).toThrow(
+      PermanentUpstreamError,
+    );
+  });
+
+  it("rejects a same-language direction (pt-br -> pt-br)", () => {
+    expect(() =>
+      parseCorrectionRow({ ...validRow, source_language: "pt-br", target_language: "pt-br" }),
+    ).toThrow(PermanentUpstreamError);
+  });
+
+  it("rejects an 'other' source language", () => {
+    expect(() => parseCorrectionRow({ ...validRow, source_language: "other" })).toThrow(
+      PermanentUpstreamError,
+    );
+  });
+
+  it("rejects an empty (whitespace-only) source_term", () => {
+    expect(() => parseCorrectionRow({ ...validRow, source_term: "   " })).toThrow(
+      PermanentUpstreamError,
+    );
+  });
+
+  it("rejects an empty (whitespace-only) target_term", () => {
+    expect(() => parseCorrectionRow({ ...validRow, target_term: "   " })).toThrow(
+      PermanentUpstreamError,
+    );
+  });
+
+  it("rejects a source_term longer than 100 characters", () => {
+    expect(() => parseCorrectionRow({ ...validRow, source_term: "x".repeat(101) })).toThrow(
+      PermanentUpstreamError,
+    );
+  });
+
+  it("rejects a target_term longer than 100 characters", () => {
+    expect(() => parseCorrectionRow({ ...validRow, target_term: "x".repeat(101) })).toThrow(
+      PermanentUpstreamError,
+    );
+  });
+
+  it("accepts a term exactly at the 100-character ceiling", () => {
+    expect(() => parseCorrectionRow({ ...validRow, source_term: "x".repeat(100) })).not.toThrow();
+  });
+
+  it("rejects a non-record row", () => {
+    expect(() => parseCorrectionRow("not-a-record")).toThrow(PermanentUpstreamError);
   });
 });

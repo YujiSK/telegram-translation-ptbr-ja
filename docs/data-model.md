@@ -84,6 +84,11 @@ ones).
   invalid-for-that-key value can never be written:
   - `preference_key = 'tone'` → `preference_value` in `casual`|`neutral`|`formal`
   - `preference_key = 'emoji_usage'` → `preference_value` in `none`|`light`|`frequent`
+- **Row-boundary validation:** `parsePreferenceRow` in
+  `src/infrastructure/d1/speaker-preferences.ts` independently
+  re-checks the same key→value pairing on every row read from D1, as
+  defense-in-depth alongside the schema's own `CHECK` constraint — not a
+  replacement for it (Phase 5 review, Issue 3-A).
 - **Must not store:** free-text explanations, who set it (setter/admin
   identity) — deliberately not added in Phase 5 (privacy minimization);
   Phase 6 can add an audit field in its own migration if a concrete need
@@ -133,8 +138,21 @@ renderings of names, in-jokes).
 - **Index candidates:** the primary key above already supports the
   Phase 5 read pattern (all corrections for a `(chat_id, user_id)`,
   optionally filtered by direction, ordered by `updated_at DESC,
-source_term ASC` — see `listTranslationCorrections` in
-  `src/infrastructure/d1/translation-corrections.ts`).
+source_language ASC, target_language ASC, source_term ASC` — see
+  `listTranslationCorrections` in
+  `src/infrastructure/d1/translation-corrections.ts`). The extra
+  tie-breaker columns beyond `updated_at DESC` make the ordering fully
+  deterministic: two corrections in opposite directions can otherwise
+  share both `updated_at` and `source_term`, which would make the
+  20-item cap (`MAX_PROMPT_CORRECTIONS` in
+  `src/domain/speaker-memory.ts`) select a non-reproducible subset at
+  the boundary (Phase 5 review, Issue 4).
+- **Row-boundary validation:** `parseCorrectionRow` in
+  `src/infrastructure/d1/translation-corrections.ts` independently
+  re-checks direction (`ja`↔`pt-br` only) and term length (non-empty,
+  ≤100 chars) on every row read from D1, as defense-in-depth alongside
+  the schema's own `CHECK` constraints — not a replacement for them
+  (Phase 5 review, Issue 3-B).
 
 ## `processed_updates`
 

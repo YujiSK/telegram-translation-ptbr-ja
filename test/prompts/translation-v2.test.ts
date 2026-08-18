@@ -153,7 +153,7 @@ describe("buildTranslationInputV2 — known term corrections", () => {
     expect(input[1]?.content).toContain('ja -> pt-br: "synthetic-term" => "termo-sintetico"');
   });
 
-  it("caps corrections passed through at 20 even if more are supplied", () => {
+  it("caps corrections passed through at 20 even if more are supplied (defense in depth)", () => {
     const applicableCorrections = Array.from({ length: 25 }, (_, index) => ({
       sourceLanguage: "ja" as const,
       targetLanguage: "pt-br" as const,
@@ -171,11 +171,13 @@ describe("buildTranslationInputV2 — known term corrections", () => {
       .split("\n")
       .filter((line) => line.includes("=>"));
 
-    // buildTranslationInputV2 renders whatever it is given; capping to 20
-    // is selectApplicableCorrections' responsibility (see
-    // test/domain/speaker-memory.test.ts) — this test documents that the
-    // prompt builder does not silently drop or reorder what it receives.
-    expect(correctionLines).toHaveLength(25);
+    // The normal read path already caps at 20 via selectApplicableCorrections
+    // (see test/domain/speaker-memory.test.ts), but the prompt builder
+    // itself never trusts a caller to have done that — see
+    // docs/implementation-plan.md Phase 5 review, Issue 5.
+    expect(correctionLines).toHaveLength(20);
+    expect(correctionLines[0]).toContain("term-0");
+    expect(correctionLines[19]).toContain("term-19");
   });
 
   it("instructs the model to use a correction only on a literal source-term match and matching direction", () => {
@@ -260,5 +262,98 @@ describe("buildTranslationInputV2 — no Secret or personal-identifier leakage",
 
     expect(combined).not.toContain("displayName");
     expect(combined).not.toContain("telegramUserId");
+  });
+});
+
+describe("buildTranslationInputV2 — Issue 2 regression: tone preference is not contradicted by fixed instructions", () => {
+  it("does not hardcode a fixed casual register regardless of style preference", () => {
+    const input = buildTranslationInputV2({ sourceText: "hello" });
+
+    expect(input[0]?.content).not.toMatch(/translate it into natural,? casual/i);
+    expect(input[0]?.content).not.toMatch(/more formal.*than the original/i);
+  });
+
+  it("states an explicit priority order: current message > explicit preference > observed > default", () => {
+    const input = buildTranslationInputV2({ sourceText: "hello" });
+
+    expect(input[0]?.content).toMatch(/priority order/i);
+    const priorityIndex = (input[0]?.content ?? "").search(/priority order/i);
+    const messageToneIndex = (input[0]?.content ?? "").search(
+      /message's own clearly expressed tone/i,
+    );
+    const preferenceIndex = (input[0]?.content ?? "").search(
+      /speaker's resolved style preference/i,
+    );
+    // The message's own tone is stated as a higher priority than the
+    // speaker's style preference (appears earlier in the ordered list).
+    expect(priorityIndex).toBeGreaterThanOrEqual(0);
+    expect(messageToneIndex).toBeGreaterThan(priorityIndex);
+    expect(preferenceIndex).toBeGreaterThan(messageToneIndex);
+  });
+
+  it("allows a formal tone preference without contradicting the base instructions", () => {
+    const memory: EffectiveSpeakerMemory = {
+      tone: { source: "explicit", value: "formal" },
+      emojiUsage: { source: "none" },
+      applicableCorrections: [],
+    };
+
+    const input = buildTranslationInputV2({ sourceText: "hello", memory });
+
+    expect(input[1]?.content).toContain("tone: formal (explicit)");
+    expect(input[0]?.content).not.toMatch(/translate it into natural,? casual/i);
+  });
+
+  it("allows a neutral tone preference without contradicting the base instructions", () => {
+    const memory: EffectiveSpeakerMemory = {
+      tone: { source: "explicit", value: "neutral" },
+      emojiUsage: { source: "none" },
+      applicableCorrections: [],
+    };
+
+    const input = buildTranslationInputV2({ sourceText: "hello", memory });
+
+    expect(input[1]?.content).toContain("tone: neutral (explicit)");
+  });
+
+  it("still supports a casual tone preference", () => {
+    const memory: EffectiveSpeakerMemory = {
+      tone: { source: "explicit", value: "casual" },
+      emojiUsage: { source: "none" },
+      applicableCorrections: [],
+    };
+
+    const input = buildTranslationInputV2({ sourceText: "hello", memory });
+
+    expect(input[1]?.content).toContain("tone: casual (explicit)");
+  });
+
+  it("still states the message's own clear tone takes priority over any style preference", () => {
+    const memory: EffectiveSpeakerMemory = {
+      tone: { source: "explicit", value: "formal" },
+      emojiUsage: { source: "none" },
+      applicableCorrections: [],
+    };
+
+    const input = buildTranslationInputV2({ sourceText: "hello", memory });
+
+    expect(input[0]?.content).toMatch(/never (use it to )?override the message's own clear tone/i);
+  });
+
+  it("still prefers explicit over observed style at the prompt-construction layer (pass-through)", () => {
+    // Priority resolution itself happens in src/domain/speaker-memory.ts
+    // (see test/domain/speaker-memory.test.ts); this asserts the prompt
+    // builder faithfully renders whichever single resolved value it is
+    // given, never re-deriving or second-guessing the source.
+    const memory: EffectiveSpeakerMemory = {
+      tone: { source: "explicit", value: "formal" },
+      emojiUsage: { source: "observed", value: "light" },
+      applicableCorrections: [],
+    };
+
+    const input = buildTranslationInputV2({ sourceText: "hello", memory });
+
+    expect(input[1]?.content).toContain("tone: formal (explicit)");
+    expect(input[1]?.content).toContain("emojiUsage: light (observed)");
   });
 });
