@@ -1,16 +1,18 @@
 # Data Model
 
-Status: **Phase 2 and Phase 5 schema implemented.**
+Status: **Phase 2, Phase 5, and Phase 6 schema implemented.**
 `migrations/0001_initial.sql` creates `allowed_chats`, `processed_updates`,
 and `speaker_profiles` for local development and tests. The remote D1
 database is provisioned and configured, and `0001_initial.sql` was
 applied remotely on 2026-08-14. `migrations/0002_speaker_memory.sql`
 (Phase 5) adds `observed_tone`/`observed_emoji_usage` to
 `speaker_profiles` and creates `speaker_preferences` and
-`translation_corrections` — verified with
+`translation_corrections`; `migrations/0003_commands.sql` (Phase 6)
+creates `bot_admins`. Both are verified with
 `wrangler d1 migrations apply --local` and by the Workers Vitest test
-suite (`test/infrastructure/d1/{repositories,speaker-memory-repositories}.test.ts`),
-but **not** applied to the remote database (that's Phase 8). The
+suite
+(`test/infrastructure/d1/{repositories,speaker-memory-repositories,bot-admins,forget-me}.test.ts`),
+but **neither** is applied to the remote database (that's Phase 8). The
 remaining tables below stay plans for the later phases that own their
 behavior.
 
@@ -68,9 +70,12 @@ used to make translations feel natural for that person.
 ## `speaker_preferences`
 
 **Implementation status:** Phase 5 schema implemented
-(`migrations/0002_speaker_memory.sql`); the `/remember`/`/forget` command
-surface that writes to it in normal operation is deferred to Phase 6 —
-Phase 5's own tests insert/read rows directly. Explicit preferences
+(`migrations/0002_speaker_memory.sql`). **Implemented (Phase 6):** the
+`/remember`/`/forget` command surface
+(`src/commands/parse-command.ts`, `src/application/execute-command.ts`)
+writes and deletes rows in normal operation —
+`upsertSpeakerPreference`/`deleteSpeakerPreference` in
+`src/infrastructure/d1/speaker-preferences.ts`. Explicit preferences
 always take priority over auto-derived features from `speaker_profiles`
 (see `docs/security-and-privacy.md` — explicit settings outrank inferred
 ones).
@@ -93,16 +98,22 @@ ones).
   identity) — deliberately not added in Phase 5 (privacy minimization);
   Phase 6 can add an audit field in its own migration if a concrete need
   arises.
-- **Retention:** until removed via `/forget` (single key) or `/forgetme`
-  (all of a user's data) — both Phase 6.
+- **Retention:** until removed via `/forget tone` / `/forget emoji_usage`
+  (single key, `deleteSpeakerPreference` — idempotent, a no-op if the key
+  was never set) or `/forgetme confirm` (all of a user's data in this
+  chat, see `forgetSpeakerData` below) — both implemented in Phase 6.
 - **Index candidates:** primary key lookup above (small table).
 
 ## `translation_corrections`
 
 **Implementation status:** Phase 5 schema implemented
-(`migrations/0002_speaker_memory.sql`); the `/correct` command that
-writes to it in normal operation is deferred to Phase 6 — Phase 5's own
-tests insert/read rows directly, using only synthetic term pairs.
+(`migrations/0002_speaker_memory.sql`). **Implemented (Phase 6):** the
+`/correct` command writes rows in normal operation
+(`upsertTranslationCorrection`), and `/forget correction <source_language>
+<target_language> <source_term>` deletes one
+(`deleteTranslationCorrection` — idempotent, a no-op if the correction
+was never stored) — both in
+`src/infrastructure/d1/translation-corrections.ts`.
 
 **Purpose:** A short term/phrase correction dictionary — never a message
 or translation archive — applied to future translations (e.g., preferred
@@ -133,8 +144,13 @@ renderings of names, in-jokes).
   new migration and document the reason there.
 - **Must not store:** the full original message the correction came from
   — only the specific term/phrase pair being corrected.
-- **Retention:** until removed (mechanism TBD — likely `/forget` extended
-  to cover corrections, or a dedicated command; **open question**, Phase 6).
+- **Retention:** until removed via `/forget correction <source_language>
+<target_language> <source_term>` (deletes one correction by its full
+  composite key; idempotent — a no-op if it was never stored) or
+  `/forgetme confirm` (all of a user's corrections in this chat). This
+  closes the Phase 5 open question: no separate `/uncorrect` command was
+  added — deletion is unified under `/forget`, per
+  `docs/implementation-plan.md` Phase 6.
 - **Index candidates:** the primary key above already supports the
   Phase 5 read pattern (all corrections for a `(chat_id, user_id)`,
   optionally filtered by direction, ordered by `updated_at DESC,
@@ -170,6 +186,34 @@ update; this table prevents double-processing.
 - **Deferred decision:** retention window and cleanup mechanism belong to
   Phase 7 reliability work; D1 has no native TTL.
 
+## `bot_admins`
+
+**Implementation status:** Phase 6 schema implemented
+(`migrations/0003_commands.sql`); read via `isBotAdmin` in
+`src/infrastructure/d1/bot-admins.ts`.
+
+**Purpose:** The runtime authority for `/enable`/`/disable` admin
+authorization (see docs/security-and-privacy.md, "Admin command
+authorization") — a fixed allowlist of Telegram user IDs, not tied to
+any specific chat.
+
+- **Implemented primary key:** `user_id` (Telegram user ID).
+- **Implemented columns:** `user_id`, `created_at`.
+- **Implemented constraint:** `CHECK (user_id > 0)`.
+- **Must not store:** which chat granted admin status, a display name,
+  or any other identifying detail beyond the bare Telegram user ID —
+  this table exists purely as a yes/no authorization check.
+- **Population:** Phase 6 implements only the read path
+  (`isBotAdmin`); there is no write path or command that inserts a row.
+  Test fixtures insert synthetic rows directly, and only ever use an
+  obviously-fake ID. Registering the first real admin row is Phase 8
+  work — see docs/security-and-privacy.md for why this stays separate
+  from `SETUP_ADMIN_SECRET`.
+- **Retention:** indefinite until an operator removes a row directly
+  (no in-bot command manages this table in Phase 6 — deliberately, since
+  self-service admin grants would be a privilege-escalation risk).
+- **Index candidates:** primary key lookup only (small table).
+
 ## `message_mappings`
 
 **Implementation status:** deferred until a later phase establishes a
@@ -193,12 +237,16 @@ its text.
 
 ## `bot_settings`
 
-**Implementation status:** deferred to the command/operations phases;
-the allowlist soft flag covers Phase 2's enable-state requirement.
+**Implementation status:** not implemented, and not currently planned —
+**resolved (Phase 6):** `/enable`/`/disable` use `allowed_chats.enabled`
+exclusively (`setAllowedChatEnabled` in
+`src/infrastructure/d1/allowed-chats.ts`); no separate `bot_settings`
+table was created for this. This section is kept only in case a future
+phase needs global (not per-chat) key/value operational settings for an
+unrelated reason.
 
-**Purpose:** Small key/value operational settings not tied to a specific
-chat or user (e.g., global enable/disable switch, schema/version
-markers).
+**Purpose (if ever needed):** Small key/value operational settings not
+tied to a specific chat or user (e.g., schema/version markers).
 
 - **Planned primary key:** `setting_key`
 - **May store:** key, value, `updated_at`, updated-by admin user ID
@@ -206,8 +254,6 @@ markers).
   `docs/security-and-privacy.md`)
 - **Retention:** indefinite (operational config)
 - **Index candidates:** primary key lookup only
-- **Open questions:** whether per-chat `/enable` and `/disable` belong
-  here or fully in `allowed_chats.enabled`
 
 ## Phase 5 speaker-memory design decisions (summary)
 
@@ -244,19 +290,57 @@ code later:
   (`wrangler d1 migrations apply --local`) and by the Workers Vitest
   suite. Applying it remotely is a Phase 8 action.
 - **Deletion commands** (`/forget`, `/forgetme`, and a
-  correction-specific removal mechanism) are deferred to Phase 6 — Phase
-  5 only implements the read/write repository functions Phase 6's
-  commands will call.
+  correction-specific removal mechanism) were deferred to Phase 6 in
+  Phase 5 — Phase 5 only implemented the read/write repository functions
+  Phase 6's commands would call. **Implemented (Phase 6)** — see below.
 - **Reliability/observability hardening** (e.g. making a swallowed
   observed-profile-write failure operator-visible, retention policies)
   is deferred to Phase 7 — see `docs/architecture.md`, "Speaker memory
   read/write ordering".
 
+## Phase 6 command-surface design decisions (summary)
+
+Recorded here so they don't have to be re-derived from the migration or
+code later:
+
+- **`/forgetme` scope, confirmed:** `/forgetme confirm` deletes
+  `speaker_profiles`, `speaker_preferences`, and
+  `translation_corrections` rows for the caller's own `(chat_id,
+user_id)` in the **current chat only** — never Telegram-wide, never
+  another user's data (`forgetSpeakerData` in
+  `src/infrastructure/d1/forget-me.ts`, atomic via `db.batch()`). Bare
+  `/forgetme` (no `confirm`) deletes nothing — it only shows how to
+  confirm, as an accidental-deletion guard.
+- **`/forgetme` deliberately does not touch `processed_updates`** — that
+  table holds no message content, only dedupe bookkeeping keyed by
+  `update_id`, so it isn't "a user's data" in the sense `/forgetme`
+  promises to delete.
+- **`/forgetme` deliberately does not touch `allowed_chats` or
+  `bot_admins`** — chat-level and admin-level state belongs to the chat
+  and the bot operator, not to an individual user's own data.
+- **Correction deletion, confirmed:** `/forget correction
+<source_language> <target_language> <source_term>` deletes one
+  correction by its full composite key. No separate `/uncorrect` command
+  was added — this closes the Phase 5 open question by folding
+  correction deletion into `/forget`'s existing grammar.
+- **`bot_admins` scope:** global (by `user_id` alone, not per-chat) —
+  an admin is an admin in every chat the bot operates in. There is no
+  per-chat admin concept in Phase 6.
+- **`allowed_chats` remains the sole enable/disable authority** — no
+  `bot_settings` table was introduced; see the "resolved" note on
+  `bot_settings` above.
+- **The Phase 6 migration (`0003_commands.sql`) has not been applied to
+  the remote database** — only verified locally
+  (`wrangler d1 migrations apply --local`) and by the Workers Vitest
+  suite. Applying it remotely is a Phase 8 action, same as
+  `0002_speaker_memory.sql`.
+
 ## Migration policy
 
 The first migration is `migrations/0001_initial.sql`; the second is
-`migrations/0002_speaker_memory.sql` (Phase 5). Future migrations are
-created with:
+`migrations/0002_speaker_memory.sql` (Phase 5); the third is
+`migrations/0003_commands.sql` (Phase 6). Future migrations are created
+with:
 
 ```sh
 npx wrangler d1 migrations create <database-name> <description>
@@ -266,6 +350,6 @@ This creates a numbered `.sql` file per Cloudflare's D1 migration workflow
 (https://developers.cloudflare.com/d1/reference/migrations/). Migrations
 are applied with `wrangler d1 migrations apply` (`--local` for local dev,
 `--remote` for the deployed database) — not run manually against
-production. `0002_speaker_memory.sql` has been applied and tested with
-`--local` only; a `--remote` apply requires the same explicit approval as
-any other Phase 8 action.
+production. `0002_speaker_memory.sql` and `0003_commands.sql` have each
+been applied and tested with `--local` only; a `--remote` apply requires
+the same explicit approval as any other Phase 8 action.

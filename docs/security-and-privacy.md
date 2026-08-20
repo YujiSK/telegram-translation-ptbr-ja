@@ -65,9 +65,28 @@ even if someone adds it elsewhere.
 `/enable` and `/disable` (and any future admin-only command) must check
 the calling Telegram user ID against an explicit admin list/mechanism
 before acting — never inferred from group membership or admin status in
-Telegram itself, since that can change without the bot's knowledge. Exact
-mechanism (D1 table vs. `SETUP_ADMIN_SECRET`-gated bootstrap) is decided
-in Phase 6.
+Telegram itself, since that can change without the bot's knowledge.
+
+**Decided and implemented (Phase 6):**
+
+- **Runtime authority:** the `bot_admins` D1 table
+  (`migrations/0003_commands.sql`; `user_id INTEGER PRIMARY KEY`),
+  checked via `isBotAdmin` in `src/infrastructure/d1/bot-admins.ts`.
+  `src/application/execute-command.ts` calls it before `/enable` or
+  `/disable` mutates `allowed_chats` — a non-admin caller gets a generic
+  "This command is restricted to bot admins." reply with no detail about
+  the mechanism, per the response-policy rule below.
+- **Production bootstrap deferred to Phase 8:** Phase 6 implements only
+  the read path against `bot_admins`. There is no command or route in
+  Phase 6 that inserts a row — self-service admin grants would be a
+  privilege-escalation risk. Registering the repository's real initial
+  admin (Yuji's own Telegram user ID) and any future
+  `SETUP_ADMIN_SECRET`-gated bootstrap endpoint both remain Phase 8
+  actions, requiring the same explicit approval as any other external
+  setup step.
+- **No real Telegram user ID is committed for this purpose:** every
+  `bot_admins` fixture in this repository's tests uses an obviously
+  synthetic ID.
 
 ## Prompt injection considerations
 
@@ -102,9 +121,19 @@ translate — never as instructions. **Implemented (Phase 4):**
 
 ## Data deletion
 
-- `/forgetme` removes a user's own data (see `docs/data-model.md` for
-  which tables that touches).
-- `/forget` removes a specific remembered setting.
+**Implemented (Phase 6):**
+
+- `/forgetme` (bare) explains how to confirm and deletes nothing;
+  `/forgetme confirm` removes the caller's own data in the current chat
+  — `speaker_profiles`, `speaker_preferences`, and
+  `translation_corrections` rows scoped to that `(chat_id, user_id)`,
+  atomically (see `docs/data-model.md`, "Phase 6 command-surface design
+  decisions"). Never another user's data, never another chat's data.
+- `/forget tone` / `/forget emoji_usage` removes a specific remembered
+  preference; `/forget correction <source_language> <target_language>
+<source_term>` removes a specific stored correction. Both are
+  idempotent — removing something already absent is a normal success,
+  not an error.
 - Admins can disable a chat (`/disable`), stopping further processing;
   full data removal for a chat is an operational action, not yet
   specified beyond the tables in `docs/data-model.md`.
@@ -126,6 +155,28 @@ current message (`src/prompts/translation-v2.ts`,
 `src/domain/speaker-memory.ts` `selectApplicableCorrections`). Never sent
 to OpenAI: the speaker's display name, Telegram user ID, chat ID, or any
 correction/preference belonging to a different `(chat_id, user_id)`.
+
+**Implemented (Phase 6):** a command message (`/help`, `/status`,
+`/remember tone formal`, ...) is never sent to OpenAI at all —
+`src/application/execute-command.ts` has no OpenAI import and is never
+given an OpenAI boundary. Command text is parsed locally
+(`src/commands/parse-command.ts`) and never leaves the Worker as
+anything but a Telegram reply.
+
+## Command response policy
+
+**Implemented (Phase 6):** every command reply is plain text — no
+Markdown/HTML `parse_mode` is used, so a stored preference/correction
+term can never be interpreted as formatting markup by Telegram. A reply
+never includes: a Secret value, a raw D1 error message, a stack trace, a
+Telegram user ID, a chat ID, another user's data, or (for `/status` and
+`/profile`) the text of a stored correction — only a count. An
+admin-authorization denial states only that the command is
+admin-restricted, never who the admins are or how the check works (see
+"Admin command authorization" above — the mechanism's non-secrecy is a
+design choice for the _code_, not an invitation to reveal specific admin
+identities over Telegram). See `src/commands/responses.ts` for every
+response string.
 
 ## Cost / usage runaway prevention
 
@@ -176,6 +227,14 @@ either).
   that fails boundary validation) as a `PermanentUpstreamError`. See
   `docs/architecture.md`'s dedupe-and-retry section for what this means
   for a redelivered Telegram update.
+- **Implemented (Phase 6):** every D1 call reachable from a command —
+  reads and mutations alike — uses the same `runD1Query` classification,
+  so a transient D1 outage during `/remember`, `/forget`, `/forgetme
+confirm`, `/correct`, `/enable`, or `/disable` releases the dedupe
+  reservation the same way a translation-path failure does. Every
+  command mutation is idempotent, so redelivery after release is safe —
+  see `docs/architecture.md`, "Command D1 error classification and
+  dedupe".
 
 ## D1 / SQL injection
 
@@ -191,9 +250,10 @@ Because this bot processes real family conversations:
   in plain terms, what the bot does (translates PT-BR ↔ JA in the group),
   what it stores (see `docs/data-model.md` — profile/preference metadata,
   not message text), and that the source code is public.
-- `/status` (Phase 6) should make the bot's current state (enabled chat,
-  applicable settings) visible to anyone in the group, not just admins,
-  so this isn't opaque.
+- **Implemented (Phase 6):** `/status` makes the bot's current state
+  (enabled chat, the caller's own effective settings, a correction
+  count) visible to anyone in the group, not just admins, so this isn't
+  opaque — see `src/commands/responses.ts` `formatStatusReply`.
 - This disclosure is an operational step for Yuji before pilot rollout
   (Phase 9), not something the code enforces — noted here so it isn't
   forgotten.

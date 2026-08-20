@@ -2,12 +2,15 @@ import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  deleteSpeakerPreference,
   getSpeakerPreference,
   getSpeakerPreferences,
   parsePreferenceRow,
   upsertSpeakerPreference,
 } from "../../../src/infrastructure/d1/speaker-preferences";
 import {
+  countTranslationCorrections,
+  deleteTranslationCorrection,
   listTranslationCorrections,
   parseCorrectionRow,
   upsertTranslationCorrection,
@@ -713,5 +716,209 @@ describe("parseCorrectionRow — D1 row boundary validation (Phase 5 review, Iss
 
   it("rejects a non-record row", () => {
     expect(() => parseCorrectionRow("not-a-record")).toThrow(PermanentUpstreamError);
+  });
+});
+
+describe("deleteSpeakerPreference — Phase 6", () => {
+  it("removes a stored preference", async () => {
+    await upsertSpeakerPreference(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      key: "tone",
+      value: "formal",
+    });
+
+    await deleteSpeakerPreference(env.DB, CHAT_ONE, USER_ONE, "tone");
+
+    await expect(getSpeakerPreference(env.DB, CHAT_ONE, USER_ONE, "tone")).resolves.toBeNull();
+  });
+
+  it("is idempotent when the preference was never set", async () => {
+    await expect(
+      deleteSpeakerPreference(env.DB, CHAT_ONE, USER_ONE, "tone"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("only removes the targeted key, leaving the other preference axis intact", async () => {
+    await upsertSpeakerPreference(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      key: "tone",
+      value: "formal",
+    });
+    await upsertSpeakerPreference(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      key: "emoji_usage",
+      value: "frequent",
+    });
+
+    await deleteSpeakerPreference(env.DB, CHAT_ONE, USER_ONE, "tone");
+
+    await expect(getSpeakerPreference(env.DB, CHAT_ONE, USER_ONE, "tone")).resolves.toBeNull();
+    await expect(getSpeakerPreference(env.DB, CHAT_ONE, USER_ONE, "emoji_usage")).resolves.toBe(
+      "frequent",
+    );
+  });
+
+  it("never removes another user's or another chat's preference", async () => {
+    await upsertSpeakerPreference(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      key: "tone",
+      value: "formal",
+    });
+    await upsertSpeakerPreference(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_TWO,
+      key: "tone",
+      value: "casual",
+    });
+    await upsertSpeakerPreference(env.DB, {
+      chatId: CHAT_TWO,
+      userId: USER_ONE,
+      key: "tone",
+      value: "neutral",
+    });
+
+    await deleteSpeakerPreference(env.DB, CHAT_ONE, USER_ONE, "tone");
+
+    await expect(getSpeakerPreference(env.DB, CHAT_ONE, USER_TWO, "tone")).resolves.toBe("casual");
+    await expect(getSpeakerPreference(env.DB, CHAT_TWO, USER_ONE, "tone")).resolves.toBe("neutral");
+  });
+
+  it("classifies a raw D1 query failure as transient", async () => {
+    const prepareSpy = vi.spyOn(env.DB, "prepare").mockImplementation(() => {
+      throw new Error("synthetic D1 outage");
+    });
+    try {
+      await expect(
+        deleteSpeakerPreference(env.DB, CHAT_ONE, USER_ONE, "tone"),
+      ).rejects.toBeInstanceOf(TransientUpstreamError);
+    } finally {
+      prepareSpy.mockRestore();
+    }
+  });
+});
+
+describe("deleteTranslationCorrection and countTranslationCorrections — Phase 6", () => {
+  it("removes a stored correction", async () => {
+    await upsertTranslationCorrection(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      sourceLanguage: "ja",
+      targetLanguage: "pt-br",
+      sourceTerm: "synthetic-term",
+      targetTerm: "termo-sintetico",
+    });
+
+    await deleteTranslationCorrection(env.DB, CHAT_ONE, USER_ONE, "ja", "pt-br", "synthetic-term");
+
+    await expect(listTranslationCorrections(env.DB, CHAT_ONE, USER_ONE)).resolves.toEqual([]);
+  });
+
+  it("is idempotent when the correction was never stored", async () => {
+    await expect(
+      deleteTranslationCorrection(env.DB, CHAT_ONE, USER_ONE, "ja", "pt-br", "never-stored"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("only removes the exact scoped correction, leaving others untouched", async () => {
+    await upsertTranslationCorrection(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      sourceLanguage: "ja",
+      targetLanguage: "pt-br",
+      sourceTerm: "term-a",
+      targetTerm: "termo-a",
+    });
+    await upsertTranslationCorrection(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      sourceLanguage: "ja",
+      targetLanguage: "pt-br",
+      sourceTerm: "term-b",
+      targetTerm: "termo-b",
+    });
+    await upsertTranslationCorrection(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_TWO,
+      sourceLanguage: "ja",
+      targetLanguage: "pt-br",
+      sourceTerm: "term-a",
+      targetTerm: "outro-termo-a",
+    });
+    await upsertTranslationCorrection(env.DB, {
+      chatId: CHAT_TWO,
+      userId: USER_ONE,
+      sourceLanguage: "ja",
+      targetLanguage: "pt-br",
+      sourceTerm: "term-a",
+      targetTerm: "outro-termo-a2",
+    });
+
+    await deleteTranslationCorrection(env.DB, CHAT_ONE, USER_ONE, "ja", "pt-br", "term-a");
+
+    await expect(listTranslationCorrections(env.DB, CHAT_ONE, USER_ONE)).resolves.toEqual([
+      {
+        sourceLanguage: "ja",
+        targetLanguage: "pt-br",
+        sourceTerm: "term-b",
+        targetTerm: "termo-b",
+      },
+    ]);
+    await expect(countTranslationCorrections(env.DB, CHAT_ONE, USER_TWO)).resolves.toBe(1);
+    await expect(countTranslationCorrections(env.DB, CHAT_TWO, USER_ONE)).resolves.toBe(1);
+  });
+
+  it("countTranslationCorrections returns 0 when nothing is stored", async () => {
+    await expect(countTranslationCorrections(env.DB, CHAT_ONE, USER_ONE)).resolves.toBe(0);
+  });
+
+  it("countTranslationCorrections counts only the scoped (chat, user)", async () => {
+    await upsertTranslationCorrection(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      sourceLanguage: "ja",
+      targetLanguage: "pt-br",
+      sourceTerm: "term-a",
+      targetTerm: "termo-a",
+    });
+    await upsertTranslationCorrection(env.DB, {
+      chatId: CHAT_ONE,
+      userId: USER_ONE,
+      sourceLanguage: "pt-br",
+      targetLanguage: "ja",
+      sourceTerm: "term-b",
+      targetTerm: "termo-b",
+    });
+
+    await expect(countTranslationCorrections(env.DB, CHAT_ONE, USER_ONE)).resolves.toBe(2);
+  });
+
+  it("classifies a raw D1 query failure as transient (deleteTranslationCorrection)", async () => {
+    const prepareSpy = vi.spyOn(env.DB, "prepare").mockImplementation(() => {
+      throw new Error("synthetic D1 outage");
+    });
+    try {
+      await expect(
+        deleteTranslationCorrection(env.DB, CHAT_ONE, USER_ONE, "ja", "pt-br", "term"),
+      ).rejects.toBeInstanceOf(TransientUpstreamError);
+    } finally {
+      prepareSpy.mockRestore();
+    }
+  });
+
+  it("classifies a raw D1 query failure as transient (countTranslationCorrections)", async () => {
+    const prepareSpy = vi.spyOn(env.DB, "prepare").mockImplementation(() => {
+      throw new Error("synthetic D1 outage");
+    });
+    try {
+      await expect(countTranslationCorrections(env.DB, CHAT_ONE, USER_ONE)).rejects.toBeInstanceOf(
+        TransientUpstreamError,
+      );
+    } finally {
+      prepareSpy.mockRestore();
+    }
   });
 });

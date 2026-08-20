@@ -1,6 +1,12 @@
 import type { TranslationTargetLanguage } from "../../domain/language";
 import type { TranslationCorrection } from "../../domain/speaker-memory";
-import { invalidD1Row, isNonEmptyString, isRecord, runD1Query } from "./row-validation";
+import {
+  invalidD1Row,
+  isNonEmptyString,
+  isRecord,
+  isSafeInteger,
+  runD1Query,
+} from "./row-validation";
 
 export interface UpsertTranslationCorrectionInput {
   readonly chatId: number;
@@ -111,27 +117,83 @@ export async function listTranslationCorrections(
  * same `(chat_id, user_id, source_language, target_language, source_term)`
  * simply updates `target_term`. An invalid language direction or an
  * empty/too-long term is rejected by the schema's `CHECK` constraints at
- * the SQL boundary, not pre-validated here.
+ * the SQL boundary, not pre-validated here. The only caller in normal
+ * operation is Phase 6's `/correct`, whose parser
+ * (`src/commands/parse-command.ts`) already rejects an invalid direction
+ * or term before this is ever called, so a real `CHECK` violation here is
+ * not expected. Wrapped in `runD1Query` so a genuine D1 outage during a
+ * command mutation is classified as `TransientUpstreamError` — see
+ * docs/architecture.md, "Command D1 error classification and dedupe"
+ * (Phase 6).
  */
 export async function upsertTranslationCorrection(
   db: D1Database,
   input: UpsertTranslationCorrectionInput,
 ): Promise<void> {
-  await db
-    .prepare(
-      `INSERT INTO translation_corrections (chat_id, user_id, source_language, target_language, source_term, target_term)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-       ON CONFLICT (chat_id, user_id, source_language, target_language, source_term) DO UPDATE SET
-         target_term = excluded.target_term,
-         updated_at = CURRENT_TIMESTAMP`,
-    )
-    .bind(
-      input.chatId,
-      input.userId,
-      input.sourceLanguage,
-      input.targetLanguage,
-      input.sourceTerm,
-      input.targetTerm,
-    )
-    .run();
+  await runD1Query(() =>
+    db
+      .prepare(
+        `INSERT INTO translation_corrections (chat_id, user_id, source_language, target_language, source_term, target_term)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT (chat_id, user_id, source_language, target_language, source_term) DO UPDATE SET
+           target_term = excluded.target_term,
+           updated_at = CURRENT_TIMESTAMP`,
+      )
+      .bind(
+        input.chatId,
+        input.userId,
+        input.sourceLanguage,
+        input.targetLanguage,
+        input.sourceTerm,
+        input.targetTerm,
+      )
+      .run(),
+  );
+}
+
+/**
+ * Removes a single correction by its full composite key, used by Phase
+ * 6's `/forget correction <source_language> <target_language> <term>`.
+ * Idempotent: deleting a correction that doesn't exist (already removed,
+ * or never stored) is a normal no-op, never an error — safe for a
+ * Telegram redelivery of the same `/forget` to repeat.
+ */
+export async function deleteTranslationCorrection(
+  db: D1Database,
+  chatId: number,
+  userId: number,
+  sourceLanguage: TranslationTargetLanguage,
+  targetLanguage: TranslationTargetLanguage,
+  sourceTerm: string,
+): Promise<void> {
+  await runD1Query(() =>
+    db
+      .prepare(
+        `DELETE FROM translation_corrections
+         WHERE chat_id = ?1 AND user_id = ?2 AND source_language = ?3
+           AND target_language = ?4 AND source_term = ?5`,
+      )
+      .bind(chatId, userId, sourceLanguage, targetLanguage, sourceTerm)
+      .run(),
+  );
+}
+
+/** Used by `/status` and `/profile` to show a count only — never the correction terms themselves (docs/security-and-privacy.md). */
+export async function countTranslationCorrections(
+  db: D1Database,
+  chatId: number,
+  userId: number,
+): Promise<number> {
+  const row = await runD1Query(() =>
+    db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM translation_corrections WHERE chat_id = ?1 AND user_id = ?2",
+      )
+      .bind(chatId, userId)
+      .first(),
+  );
+  if (!isRecord(row) || !isSafeInteger(row.count)) {
+    throw invalidD1Row("translation correction count");
+  }
+  return row.count;
 }

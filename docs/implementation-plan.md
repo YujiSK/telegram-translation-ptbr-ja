@@ -1,17 +1,21 @@
 # Implementation Plan
 
-**Current phase: Phase 5 completed; Phase 6 not started.** OpenAI
+**Current phase: Phase 6 completed; Phase 7 not started.** OpenAI
 translation local implementation: Completed. Structured Outputs mock
 tests: Completed. Telegram reply orchestration mock tests: Completed.
 Speaker Memory local schema: Completed. Memory repository: Completed.
 Effective memory resolution: Completed. Prompt v2: Completed. Mock/local
-D1 tests: Completed. Remote `0002_speaker_memory.sql` migration: Pending
-until Phase 8. Real family profile data: Not stored (only synthetic
-fixtures exist in tests). Real OpenAI/Telegram API test: Not performed
-(all Phase 4/5 tests use a mocked OpenAI/Telegram HTTP response, per
-design). Telegram Bot creation, Cloudflare Secret registration, Worker
-deployment, and Telegram webhook registration: Pending until Phase 8 —
-see Phase 3, Phase 4, Phase 5, and Phase 8 below.
+D1 tests: Completed. Command surface (`/help`, `/status`, `/profile`,
+`/remember`, `/forget`, `/forgetme`, `/correct`, `/enable`, `/disable`):
+Completed, local schema (`migrations/0003_commands.sql`, `bot_admins`)
+and mock/local D1 tests only. Remote `0002_speaker_memory.sql` and
+`0003_commands.sql` migrations: Pending until Phase 8. Real family
+profile data: Not stored (only synthetic fixtures exist in tests). Real
+OpenAI/Telegram API test: Not performed (all Phase 4/5/6 tests use a
+mocked OpenAI/Telegram HTTP response, per design). Telegram Bot creation,
+Cloudflare Secret registration, Worker deployment, and Telegram webhook
+registration: Pending until Phase 8 — see Phase 3, Phase 4, Phase 5,
+Phase 6, and Phase 8 below.
 
 Rule for every phase (see `docs/project-rules.md` rules 13–14): implement
 one phase at a time, verify with `npm run check` before moving to the
@@ -281,6 +285,33 @@ API call has been made.
 
 ## Phase 6 — Commands
 
+**Status: completed.** All nine commands (`/help`, `/status`, `/profile`,
+`/remember`, `/forget`, `/forgetme`, `/correct`, and admin-only
+`/enable`/`/disable`) are implemented as a pure parser
+(`src/commands/parse-command.ts`, `src/commands/types.ts`), pure
+plain-text response builders (`src/commands/responses.ts`), and a
+boundary-injected orchestration use case
+(`src/application/execute-command.ts`) wired into the webhook handler
+(`src/handlers/telegram-webhook.ts`) alongside — and completely separate
+from — the Phase 4/5 translation flow: a command message never reaches
+OpenAI, the message-length check, or the speaker-memory read/write path.
+Admin authorization is a new local-only `bot_admins` table
+(`migrations/0003_commands.sql`), read via
+`src/infrastructure/d1/bot-admins.ts`; the three-state chat lookup
+(`getAllowedChatState`) and `setAllowedChatEnabled` in
+`src/infrastructure/d1/allowed-chats.ts` implement the "`/enable`
+exception on a disabled-but-known chat, never on an unknown chat" rule.
+`/forgetme confirm` deletes `speaker_profiles`, `speaker_preferences`,
+and `translation_corrections` for the caller's `(chat_id, user_id)` as
+one atomic `db.batch()` (`src/infrastructure/d1/forget-me.ts`). All D1
+mutations reachable from a command are idempotent and wrapped in
+`runD1Query` for the same transient/permanent classification Phase 5
+established for reads, so the dedupe-reservation release policy extends
+correctly to command failures — see docs/architecture.md. `npm run
+check` green (423 tests) and CI green. The remote `0003_commands.sql`
+migration has **not** been applied — verified with `--local` only, same
+as `0002_speaker_memory.sql` (Phase 8).
+
 - **目的:** Implement the Telegram command surface for status, profile
   management, memory management, and admin control.
 - **実装内容:** `commands/` implementations for `/status`, `/profile`,
@@ -299,8 +330,12 @@ API call has been made.
   Telegram/OpenAI as needed. No live external calls in CI.
 - **Yujiによる手動作業:** Decide/provide the concrete admin
   identification mechanism if it requires a real Telegram user ID (e.g.,
-  Yuji's own ID as the initial admin).
-- **次フェーズへ進む前の停止点:** Stop once all listed commands are
+  Yuji's own ID as the initial admin) — **deferred to Phase 8**: Phase 6
+  implements only the runtime `bot_admins` read path and local-only
+  schema; registering the first real admin row (and any
+  `SETUP_ADMIN_SECRET`-gated bootstrap route) is Phase 8 work, per
+  docs/security-and-privacy.md.
+- **次フェーズへ進む前の停止点:** Reached. All listed commands are
   implemented and tested. Confirm before the reliability/security
   hardening phase.
 

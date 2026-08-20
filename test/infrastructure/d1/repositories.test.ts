@@ -1,7 +1,11 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { isChatAllowed } from "../../../src/infrastructure/d1/allowed-chats";
+import {
+  getAllowedChatState,
+  isChatAllowed,
+  setAllowedChatEnabled,
+} from "../../../src/infrastructure/d1/allowed-chats";
 import {
   hasProcessedUpdate,
   recordUpdateIfNew,
@@ -28,14 +32,15 @@ beforeEach(async () => {
   ]);
 });
 
-describe("D1 migrations 0001 and 0002 applied in order", () => {
-  it("creates every Phase 2 and Phase 5 table plus the migration ledger", async () => {
+describe("D1 migrations 0001, 0002, and 0003 applied in order", () => {
+  it("creates every Phase 2, Phase 5, and Phase 6 table plus the migration ledger", async () => {
     const rows = await env.DB.prepare(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('allowed_chats', 'processed_updates', 'speaker_profiles', 'speaker_preferences', 'translation_corrections', 'd1_migrations') ORDER BY name",
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('allowed_chats', 'processed_updates', 'speaker_profiles', 'speaker_preferences', 'translation_corrections', 'bot_admins', 'd1_migrations') ORDER BY name",
     ).all();
 
     expect(rows.results.map((row) => row.name)).toEqual([
       "allowed_chats",
+      "bot_admins",
       "d1_migrations",
       "processed_updates",
       "speaker_preferences",
@@ -44,11 +49,12 @@ describe("D1 migrations 0001 and 0002 applied in order", () => {
     ]);
   });
 
-  it("recorded both migrations in the ledger", async () => {
+  it("recorded all three migrations in the ledger", async () => {
     const rows = await env.DB.prepare("SELECT name FROM d1_migrations ORDER BY name").all();
     expect(rows.results.map((row) => row.name)).toEqual([
       "0001_initial.sql",
       "0002_speaker_memory.sql",
+      "0003_commands.sql",
     ]);
   });
 
@@ -90,6 +96,58 @@ describe("allowed chats repository", () => {
       .run();
 
     await expect(isChatAllowed(env.DB, CHAT_ONE)).resolves.toBe(false);
+  });
+});
+
+describe("allowed chats repository — Phase 6 three-state read and setAllowedChatEnabled", () => {
+  it("returns 'missing' for a chat with no row", async () => {
+    await expect(getAllowedChatState(env.DB, CHAT_ONE)).resolves.toBe("missing");
+  });
+
+  it("returns 'enabled' for an enabled chat", async () => {
+    await env.DB.prepare("INSERT INTO allowed_chats (chat_id) VALUES (?1)").bind(CHAT_ONE).run();
+    await expect(getAllowedChatState(env.DB, CHAT_ONE)).resolves.toBe("enabled");
+  });
+
+  it("returns 'disabled' for a chat with an existing but disabled row", async () => {
+    await env.DB.prepare("INSERT INTO allowed_chats (chat_id, enabled) VALUES (?1, 0)")
+      .bind(CHAT_ONE)
+      .run();
+    await expect(getAllowedChatState(env.DB, CHAT_ONE)).resolves.toBe("disabled");
+  });
+
+  it("setAllowedChatEnabled(false) disables an existing enabled chat", async () => {
+    await env.DB.prepare("INSERT INTO allowed_chats (chat_id) VALUES (?1)").bind(CHAT_ONE).run();
+
+    await setAllowedChatEnabled(env.DB, CHAT_ONE, false);
+
+    await expect(getAllowedChatState(env.DB, CHAT_ONE)).resolves.toBe("disabled");
+  });
+
+  it("setAllowedChatEnabled(true) re-enables an existing disabled chat", async () => {
+    await env.DB.prepare("INSERT INTO allowed_chats (chat_id, enabled) VALUES (?1, 0)")
+      .bind(CHAT_ONE)
+      .run();
+
+    await setAllowedChatEnabled(env.DB, CHAT_ONE, true);
+
+    await expect(getAllowedChatState(env.DB, CHAT_ONE)).resolves.toBe("enabled");
+  });
+
+  it("setAllowedChatEnabled never creates a row for a chat that was never allowlisted", async () => {
+    await setAllowedChatEnabled(env.DB, CHAT_ONE, true);
+
+    await expect(getAllowedChatState(env.DB, CHAT_ONE)).resolves.toBe("missing");
+  });
+
+  it("only changes the targeted chat, leaving others untouched", async () => {
+    await env.DB.prepare("INSERT INTO allowed_chats (chat_id) VALUES (?1)").bind(CHAT_ONE).run();
+    await env.DB.prepare("INSERT INTO allowed_chats (chat_id) VALUES (?1)").bind(CHAT_TWO).run();
+
+    await setAllowedChatEnabled(env.DB, CHAT_ONE, false);
+
+    await expect(getAllowedChatState(env.DB, CHAT_ONE)).resolves.toBe("disabled");
+    await expect(getAllowedChatState(env.DB, CHAT_TWO)).resolves.toBe("enabled");
   });
 });
 

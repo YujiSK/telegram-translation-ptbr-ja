@@ -1,24 +1,37 @@
 # Architecture
 
 Status: **Foundation, domain, D1 repository layer, the Telegram webhook
-boundary, OpenAI translation, and speaker memory are implemented (Phase 5
-complete).** `POST /telegram/webhook` verifies the Secret header, parses
-the Update, gates on the allowlist/dedupe tables, reads speaker memory
-(`src/domain/speaker-memory.ts`, `src/infrastructure/d1/{speaker-profiles,speaker-preferences,translation-corrections}.ts`),
-calls OpenAI exactly once per message via
-`src/infrastructure/openai/translate.ts` (prompt built by
-`src/prompts/translation-v2.ts`), and — on a `translated` outcome — posts
-the reply via `src/infrastructure/telegram/send-message.ts` and
-best-effort records the observed style. See
-`src/handlers/telegram-webhook.ts` and `src/application/translate-and-reply.ts`.
+boundary, OpenAI translation, speaker memory, and the command surface are
+implemented (Phase 6 complete).** `POST /telegram/webhook` verifies the
+Secret header, parses the Update, detects a command (if any), gates on
+the allowed-chat state and dedupe tables, and then routes to one of two
+completely separate paths:
+
+- **Command path** (Phase 6): reads speaker memory only for `/status`
+  and `/profile`'s own display (never for a translation), mutates
+  `speaker_preferences`/`translation_corrections`/`speaker_profiles`/
+  `allowed_chats` as needed, and replies via
+  `src/infrastructure/telegram/send-message.ts` — **never** calls
+  OpenAI. See `src/commands/`, `src/application/execute-command.ts`, and
+  "Command routing and chat state" below.
+- **Translation path** (Phase 4/5, ordinary text only): reads speaker
+  memory (`src/domain/speaker-memory.ts`,
+  `src/infrastructure/d1/{speaker-profiles,speaker-preferences,translation-corrections}.ts`),
+  calls OpenAI exactly once per message via
+  `src/infrastructure/openai/translate.ts` (prompt built by
+  `src/prompts/translation-v2.ts`), and — on a `translated` outcome —
+  posts the reply and best-effort records the observed style. See
+  `src/application/translate-and-reply.ts`.
+
+Both paths are orchestrated from `src/handlers/telegram-webhook.ts`.
 Every OpenAI/Telegram call in tests is mocked; no real OpenAI/Telegram
-API call has been made, and the Phase 5 D1 migration
-(`migrations/0002_speaker_memory.sql`) has been applied and tested only
-locally, not against the remote database. No Telegram bot has been
-created, no Secret is registered, no webhook is registered with
-Telegram, and the Worker is not deployed — those four actions, plus the
-remote migration, are deferred to Phase 8. See
-`docs/implementation-plan.md` for phasing.
+API call has been made, and the Phase 5 and Phase 6 D1 migrations
+(`migrations/0002_speaker_memory.sql`, `migrations/0003_commands.sql`)
+have each been applied and tested only locally, not against the remote
+database. No Telegram bot has been created, no Secret is registered, no
+webhook is registered with Telegram, and the Worker is not deployed —
+those four actions, plus the remote migrations, are deferred to Phase 8.
+See `docs/implementation-plan.md` for phasing.
 
 ## Request flow (target design)
 
@@ -108,6 +121,13 @@ webhook in, `handlers/` dispatches, `application/` orchestrates
   structurally impossible to honor (Phase 5 review, Issue 2).
   `translation-v1.ts` is unchanged and still reflects the pre-Phase-5
   design.
+- **A command message never invokes OpenAI.** `/help`, `/status`,
+  `/profile`, `/remember`, `/forget`, `/forgetme`, `/correct`,
+  `/enable`, and `/disable` are handled entirely by
+  `src/application/execute-command.ts`, which has no OpenAI import and
+  is never given an OpenAI boundary — see "Command routing and chat
+  state" below. Command text is never sent to OpenAI as content to
+  translate or as instructions.
 
 ## External dependency boundaries
 
@@ -232,6 +252,78 @@ written back best-effort, after the Telegram reply — see
    entry, never message text or Secrets — without changing this
    response/dedupe behavior.
 
+## Command routing and chat state
+
+Phase 6 adds command detection to the webhook's early routing, before
+any dedupe write:
+
+1. `parseCommandMessage` (`src/commands/parse-command.ts`) is a pure,
+   in-memory parse of `update.text` — no D1 access. It returns
+   `not-a-command` (route to the translation path below),
+   `unknown-command`, `usage-error`, or `parsed` (a typed `ParsedCommand`).
+   Both `/status` and `/status@SomeBotName` parse identically — the `@`
+   suffix is stripped without checking it against a specific bot
+   username, since the Worker has no way to know its own username
+   without an extra Telegram API call.
+2. **Allowed-chat state** (`getAllowedChatState` in
+   `src/infrastructure/d1/allowed-chats.ts`) resolves to `missing`,
+   `disabled`, or `enabled` — a three-state read, unlike the older
+   `isChatAllowed` (kept for backward compatibility), which collapses
+   `missing` and `disabled` into a single `false`. The state and the
+   parsed command together decide what happens next:
+   - `missing`: always `ignored:not-allowlisted` — no command, including
+     `/enable`, can self-allowlist an unknown chat. Initial allowlist
+     provisioning stays a Phase 8 action.
+   - `disabled` and the parsed command is **not** `/enable`: also
+     `ignored:not-allowlisted` — this applies equally to ordinary text
+     and to any other command (`/status`, `/help`, ...), matching the
+     pre-Phase-6 behavior for plain text from a disabled chat.
+   - `disabled` and the parsed command **is** `/enable`: the one
+     exception — routing continues to the dedupe reservation and then
+     the command path, where admin authorization decides whether the
+     chat actually gets re-enabled.
+   - `enabled`: routing continues normally for both commands and
+     ordinary text.
+3. **Dedupe reservation** (`recordUpdateIfNew`) happens after the
+   allowed-chat check, exactly as it already did pre-Phase-6 — a
+   redelivered command update_id is dropped as `ignored:duplicate`
+   before any mutation or reply is repeated.
+4. **Command execution** (`src/application/execute-command.ts`, boundary
+   -injected like `translateAndReply`) never imports or calls anything
+   OpenAI-related, and never validates `OPENAI_API_KEY` — only
+   `TELEGRAM_BOT_TOKEN` is required, since every command path ends in a
+   Telegram reply. `/enable` and `/disable` call
+   `src/infrastructure/d1/bot-admins.ts`'s `isBotAdmin` before mutating
+   `allowed_chats` (`setAllowedChatEnabled`); every other caller gets a
+   generic "This command is restricted to bot admins." reply with no
+   detail about the authorization mechanism. See
+   docs/security-and-privacy.md, "Admin command authorization", for why
+   this table — not `SETUP_ADMIN_SECRET` — is the runtime authority.
+
+### Command D1 error classification and dedupe
+
+Every D1 call reachable from a command (`getSpeakerProfile`,
+`getSpeakerPreferences`, `countTranslationCorrections`, `isBotAdmin`,
+`upsertSpeakerPreference`, `deleteSpeakerPreference`,
+`upsertTranslationCorrection`, `deleteTranslationCorrection`,
+`forgetSpeakerData`, `setAllowedChatEnabled`) is wrapped in the same
+`runD1Query` helper Phase 5 introduced for speaker-memory reads: a raw
+D1 query/runtime failure becomes a `TransientUpstreamError` (releases
+the dedupe reservation, so a redelivery retries the command), and a
+malformed row stays a `PermanentUpstreamError` (keeps the reservation).
+`forgetSpeakerData` (`src/infrastructure/d1/forget-me.ts`) additionally
+uses `db.batch()` for `/forgetme confirm`'s three-table delete — per
+[Cloudflare's D1 documentation](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch),
+a batch is a single SQL transaction that rolls back entirely if any
+statement fails, so the delete is genuinely all-or-nothing, not
+best-effort per table.
+
+Every command mutation is idempotent by design — `/remember` and
+`/correct` upsert, `/forget`/`/forgetme confirm` delete-if-exists, and
+`/enable`/`/disable` set an absolute boolean — so a Telegram redelivery
+after a released reservation can safely repeat the mutation (and the
+reply) without a different outcome than the first attempt.
+
 ## Dedupe and retry after a transient failure
 
 `processed_updates` (see `docs/data-model.md`) records an `update_id`
@@ -251,13 +343,16 @@ requiring no schema change:
   `src/infrastructure/d1/processed-updates.ts`) removes that reservation
   via a parameterized `DELETE ... WHERE update_id = ?1`.
 - The webhook handler calls `releaseProcessedUpdate` **only** when the
-  translate-and-reply flow throws a `TransientUpstreamError` — network
-  failure, timeout, OpenAI 429/5xx after retries are exhausted, a
-  transient Telegram failure, or (Phase 5) a transient D1 failure while
-  reading speaker memory (see "Speaker memory read/write ordering"
-  above). A `PermanentUpstreamError` (malformed OpenAI response, a
-  permanent Telegram rejection, a malformed speaker-memory row) or a
-  configuration failure never releases the reservation.
+  translate-and-reply flow (or, Phase 6, the execute-command flow)
+  throws a `TransientUpstreamError` — network failure, timeout, OpenAI
+  429/5xx after retries are exhausted, a transient Telegram failure, a
+  transient D1 failure while reading speaker memory (Phase 5, see
+  "Speaker memory read/write ordering" above), or (Phase 6) a transient
+  D1 failure during a command's read or mutation (see "Command D1 error
+  classification and dedupe" above). A `PermanentUpstreamError`
+  (malformed OpenAI response, a permanent Telegram rejection, a
+  malformed speaker-memory or command-data row) or a configuration
+  failure never releases the reservation.
 - The release itself is best-effort: if the `DELETE` also fails, the
   webhook still responds 500 (the request already failed regardless), it
   just cannot guarantee the redelivery will be retry-able.

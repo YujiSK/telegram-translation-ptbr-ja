@@ -129,20 +129,52 @@ export async function getSpeakerPreference(
  * is rejected by the `CHECK` constraint in `migrations/0002_speaker_memory.sql`
  * at the SQL boundary, not pre-validated here — consistent with how
  * `primary_language` is enforced in `speaker_profiles`
- * (see `upsertSpeakerProfile`).
+ * (see `upsertSpeakerProfile`). The only caller in normal operation is
+ * Phase 6's `/remember`, whose parser (`src/commands/parse-command.ts`)
+ * already rejects an invalid key/value before this is ever called, so a
+ * real `CHECK` violation here is not expected. Wrapped in `runD1Query` so
+ * a genuine D1 outage during a command mutation is classified as
+ * `TransientUpstreamError` — see docs/architecture.md, "Command D1 error
+ * classification and dedupe" (Phase 6).
  */
 export async function upsertSpeakerPreference(
   db: D1Database,
   input: UpsertSpeakerPreferenceInput,
 ): Promise<void> {
-  await db
-    .prepare(
-      `INSERT INTO speaker_preferences (chat_id, user_id, preference_key, preference_value)
-       VALUES (?1, ?2, ?3, ?4)
-       ON CONFLICT (chat_id, user_id, preference_key) DO UPDATE SET
-         preference_value = excluded.preference_value,
-         updated_at = CURRENT_TIMESTAMP`,
-    )
-    .bind(input.chatId, input.userId, input.key, input.value)
-    .run();
+  await runD1Query(() =>
+    db
+      .prepare(
+        `INSERT INTO speaker_preferences (chat_id, user_id, preference_key, preference_value)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (chat_id, user_id, preference_key) DO UPDATE SET
+           preference_value = excluded.preference_value,
+           updated_at = CURRENT_TIMESTAMP`,
+      )
+      .bind(input.chatId, input.userId, input.key, input.value)
+      .run(),
+  );
+}
+
+/**
+ * Removes one explicit preference, used by Phase 6's `/forget tone` /
+ * `/forget emoji_usage`. Idempotent: deleting a preference that was never
+ * set (or already removed) is a normal no-op, never an error — matches
+ * `releaseProcessedUpdate`'s "returns whether a row was actually removed"
+ * shape in `src/infrastructure/d1/processed-updates.ts`, so a Telegram
+ * redelivery of the same `/forget` can safely repeat this call.
+ */
+export async function deleteSpeakerPreference(
+  db: D1Database,
+  chatId: number,
+  userId: number,
+  key: SpeakerPreferenceKey,
+): Promise<void> {
+  await runD1Query(() =>
+    db
+      .prepare(
+        "DELETE FROM speaker_preferences WHERE chat_id = ?1 AND user_id = ?2 AND preference_key = ?3",
+      )
+      .bind(chatId, userId, key)
+      .run(),
+  );
 }

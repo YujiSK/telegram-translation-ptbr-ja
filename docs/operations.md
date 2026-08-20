@@ -2,10 +2,11 @@
 
 Status: **Planning only.** This describes the operating model this project
 is heading toward — a web-only workflow with no local machine dependency.
-As of Phase 0, most of the actions below cannot be performed yet because
-the underlying resources (Cloudflare Worker deployment, D1 database,
-Telegram webhook) don't exist. Each section says explicitly what's not
-possible yet.
+As of Phase 6, most of the actions below still cannot be performed
+against real traffic, because the underlying external resources (Worker
+deployment, Telegram bot, registered webhook) don't exist yet — only
+their local-only code and D1 schema do. Each section says explicitly
+what's not possible yet.
 
 ## Toolchain (planned, web-based)
 
@@ -19,7 +20,7 @@ possible yet.
 | Telegram BotFather                                     | Create the bot, obtain its token, set bot metadata                                                   |
 | OpenAI Platform                                        | API key management, usage/cost monitoring                                                            |
 
-## Not yet possible (as of Phase 5)
+## Not yet possible (as of Phase 6)
 
 - Deploying to Cloudflare (`wrangler deploy`) — no production Worker
   exists yet.
@@ -28,14 +29,19 @@ possible yet.
 - Rotating a Secret — none registered yet (the remote D1 database exists
   since Phase 2, but `OPENAI_API_KEY`/`TELEGRAM_WEBHOOK_SECRET`/
   `TELEGRAM_BOT_TOKEN` are not).
-- Running `/status` in a real Telegram chat — no bot exists yet.
-- Applying `migrations/0002_speaker_memory.sql` to the remote database —
-  verified with `--local` only; a `--remote` apply is a Phase 8 action.
-- Exercising the webhook boundary, the OpenAI translation pipeline, or
-  speaker memory against real traffic — all are implemented and tested
-  locally against mocked Telegram/OpenAI responses and local D1
-  (Phases 3–5), but nothing external points at any of it yet, and no
-  real OpenAI/Telegram API call has been made.
+- Running `/status` (or any command) in a real Telegram chat — no bot
+  exists yet; the command surface is implemented and tested only against
+  mocked Telegram calls and local D1.
+- Registering a real admin in `bot_admins` — Phase 6 implements only the
+  read path (`isBotAdmin`); there is no bootstrap route yet (Phase 8).
+- Applying `migrations/0002_speaker_memory.sql` or
+  `migrations/0003_commands.sql` to the remote database — both verified
+  with `--local` only; a `--remote` apply is a Phase 8 action.
+- Exercising the webhook boundary, the OpenAI translation pipeline,
+  speaker memory, or the command surface against real traffic — all are
+  implemented and tested locally against mocked Telegram/OpenAI
+  responses and local D1 (Phases 3–6), but nothing external points at
+  any of it yet, and no real OpenAI/Telegram API call has been made.
 
 ## GitHub Codespaces
 
@@ -62,10 +68,12 @@ the exact procedure when Phase 8 is implemented.
 
 ## `/status`
 
-Once implemented (Phase 6), `/status` is the primary in-Telegram
+**Implemented (Phase 6):** `/status` is the primary in-Telegram
 operational check: confirms the bot is enabled for the current chat and
-surfaces basic non-sensitive state. Treat it as the first thing to run
-when something looks wrong, once it exists.
+surfaces the caller's own effective settings and a correction count —
+see `src/commands/responses.ts` `formatStatusReply`. Not runnable
+against a real chat yet (no bot is deployed); treat it as the first
+thing to run once it is.
 
 ## Incident triage order (future)
 
@@ -73,8 +81,9 @@ Once deployed, the suggested order for investigating a reported problem:
 
 1. Cloudflare Dashboard → Worker → Logs/Observability for recent errors.
 2. `/status` in the affected Telegram chat.
-3. Cloudflare Dashboard → D1 → check `bot_settings` / `allowed_chats` for
-   an unexpected disabled state.
+3. Cloudflare Dashboard → D1 → check `allowed_chats` for an unexpected
+   disabled state, or `bot_admins` for an unexpected authorization
+   denial.
 4. OpenAI Platform usage dashboard, if translations are failing or slow.
 5. Telegram webhook info (`getWebhookInfo`) if the bot appears completely
    unresponsive.
@@ -91,12 +100,15 @@ Cloudflare's Secret model), then revoke the old value at the source
 (Telegram BotFather / OpenAI Platform). No code change is required to
 rotate a Secret's value.
 
-## Stopping usage (future)
+## Stopping usage
 
-Two levels, once implemented:
+Two levels:
 
-- **Per-chat:** `/disable` (Phase 6) — stops the bot for one chat without
-  affecting others.
-- **Full stop:** remove/rotate `TELEGRAM_WEBHOOK_SECRET` or delete the
-  webhook registration, which stops all inbound traffic regardless of
-  per-chat settings. This is the "something is actively wrong" lever.
+- **Per-chat:** `/disable` (**implemented, Phase 6** — admin-only,
+  `src/application/execute-command.ts`) sets `allowed_chats.enabled = 0`
+  for one chat via `setAllowedChatEnabled`, without affecting others.
+  Not runnable against a real chat yet (no bot is deployed).
+- **Full stop (future, Phase 8):** remove/rotate
+  `TELEGRAM_WEBHOOK_SECRET` or delete the webhook registration, which
+  stops all inbound traffic regardless of per-chat settings. This is the
+  "something is actively wrong" lever.
