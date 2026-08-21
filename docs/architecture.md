@@ -264,7 +264,13 @@ any dedupe write:
    Both `/status` and `/status@SomeBotName` parse identically — the `@`
    suffix is stripped without checking it against a specific bot
    username, since the Worker has no way to know its own username
-   without an extra Telegram API call.
+   without an extra Telegram API call. `/help`, `/status`, `/profile`,
+   `/enable`, and `/disable` take no arguments — a trailing argument
+   (e.g. `/status extra`, `/enable garbage`) is a `usage-error`, never a
+   `parsed` command with the extra text silently ignored (Phase 6
+   review, Issue 2). This matters beyond input hygiene: it's what keeps
+   `/enable garbage` out of the disabled-chat exception in step 2 below,
+   since that exception checks specifically for a `parsed` `/enable`.
 2. **Allowed-chat state** (`getAllowedChatState` in
    `src/infrastructure/d1/allowed-chats.ts`) resolves to `missing`,
    `disabled`, or `enabled` — a three-state read, unlike the older
@@ -278,10 +284,15 @@ any dedupe write:
      `ignored:not-allowlisted` — this applies equally to ordinary text
      and to any other command (`/status`, `/help`, ...), matching the
      pre-Phase-6 behavior for plain text from a disabled chat.
-   - `disabled` and the parsed command **is** `/enable`: the one
-     exception — routing continues to the dedupe reservation and then
-     the command path, where admin authorization decides whether the
-     chat actually gets re-enabled.
+   - `disabled` and the parsed command **is** `/enable` — specifically a
+     `parsed` command of kind `enable`, never a `usage-error` (see step 1
+     above): the one exception — routing continues to the dedupe
+     reservation and then the command path, where admin authorization
+     decides whether the chat actually gets re-enabled. `/enable garbage`
+     is a `usage-error`, so it takes the same `ignored:not-allowlisted`
+     path as any other disabled-chat message — no admin lookup, no D1
+     mutation, no Telegram reply, no dedupe reservation (Phase 6 review,
+     Issue 2).
    - `enabled`: routing continues normally for both commands and
      ordinary text.
 3. **Dedupe reservation** (`recordUpdateIfNew`) happens after the
@@ -324,6 +335,28 @@ Every command mutation is idempotent by design — `/remember` and
 after a released reservation can safely repeat the mutation (and the
 reply) without a different outcome than the first attempt.
 
+**`/disable` reply-failure dedupe exception (Phase 6 review, Issue 1):**
+the paragraph above — "a transient reply failure after a successful
+mutation releases the reservation" — holds for every command **except**
+`/disable`. Once `setChatEnabled(..., false)` succeeds, the chat is
+disabled, and step 2 above then drops every further update for that chat
+except a valid `parsed` `/enable`. A Telegram redelivery of _this same_
+`/disable` update could therefore never reach the command path again to
+retry the confirmation reply — releasing the reservation would strand it,
+not make it retryable. `src/application/execute-command.ts`'s `disable`
+branch (not `enable`, which has no such problem — a redelivery after a
+successful _enable_ still routes normally, since the chat stays reachable)
+catches a `TransientUpstreamError` thrown by the reply boundary **after**
+the mutation has already succeeded, and rethrows it as a
+`PermanentUpstreamError` with the same message and service, so the
+webhook's `error instanceof TransientUpstreamError` check keeps the
+reservation instead of releasing it. A transient failure in the `/disable`
+_mutation itself_ (before the reply is attempted, or for a
+non-admin-denied `/disable`) is unaffected and still releases normally,
+per the general rule above — nothing irreversible has happened yet at
+that point. A _permanent_ Telegram failure after a successful `/disable`
+already kept the reservation before this change and is unaffected.
+
 ## Dedupe and retry after a transient failure
 
 `processed_updates` (see `docs/data-model.md`) records an `update_id`
@@ -351,8 +384,11 @@ requiring no schema change:
   D1 failure during a command's read or mutation (see "Command D1 error
   classification and dedupe" above). A `PermanentUpstreamError`
   (malformed OpenAI response, a permanent Telegram rejection, a
-  malformed speaker-memory or command-data row) or a configuration
-  failure never releases the reservation.
+  malformed speaker-memory or command-data row, or — Phase 6 review,
+  Issue 1 — a Telegram reply failure after `/disable`'s mutation already
+  succeeded, deliberately reclassified from transient to permanent, see
+  "Command routing and chat state" above) or a configuration failure
+  never releases the reservation.
 - The release itself is best-effort: if the `DELETE` also fails, the
   webhook still responds 500 (the request already failed regardless), it
   just cannot guarantee the redelivery will be retry-able.

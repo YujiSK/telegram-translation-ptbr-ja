@@ -74,6 +74,23 @@ function parsed(command: ParsedCommand): CommandParseResult {
   return { kind: "parsed", command };
 }
 
+/**
+ * `/help`, `/status`, `/profile`, `/enable`, and `/disable` take no
+ * arguments — a trailing argument (e.g. `/status extra`) is a usage
+ * error, not a normal invocation with the extra text silently ignored
+ * (Phase 6 review, Issue 2). This also means `/enable garbage` is never
+ * classified as a valid parsed `/enable`, so the webhook's
+ * disabled-chat `/enable` exception (`src/handlers/telegram-webhook.ts`)
+ * never admits it.
+ */
+function parseNoArgCommand(
+  rest: string,
+  command: ParsedCommand,
+  usage: string,
+): CommandParseResult {
+  return rest === "" ? parsed(command) : usageError(usage);
+}
+
 const REMEMBER_USAGE =
   "Usage: /remember tone <casual|neutral|formal> or /remember emoji_usage <none|light|frequent>";
 
@@ -206,11 +223,11 @@ export function parseCommandMessage(text: string): CommandParseResult {
 
   switch (name) {
     case "help":
-      return parsed({ kind: "help" });
+      return parseNoArgCommand(rest, { kind: "help" }, "Usage: /help");
     case "status":
-      return parsed({ kind: "status" });
+      return parseNoArgCommand(rest, { kind: "status" }, "Usage: /status");
     case "profile":
-      return parsed({ kind: "profile" });
+      return parseNoArgCommand(rest, { kind: "profile" }, "Usage: /profile");
     case "remember":
       return parseRemember(rest);
     case "forget":
@@ -220,8 +237,8 @@ export function parseCommandMessage(text: string): CommandParseResult {
     case "correct":
       return parseCorrect(rest);
     case "enable":
-      return parsed({ kind: "enable" });
+      return parseNoArgCommand(rest, { kind: "enable" }, "Usage: /enable");
     case "disable":
-      return parsed({ kind: "disable" });
+      return parseNoArgCommand(rest, { kind: "disable" }, "Usage: /disable");
   }
 }

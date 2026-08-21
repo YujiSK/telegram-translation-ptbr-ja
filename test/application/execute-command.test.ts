@@ -11,6 +11,7 @@ import type {
   SentMessageInfo,
 } from "../../src/application/execute-command";
 import type { CommandMessage } from "../../src/commands/types";
+import { PermanentUpstreamError, TransientUpstreamError } from "../../src/shared/errors";
 
 /**
  * All IDs and message text below are obviously synthetic. All boundaries
@@ -417,5 +418,95 @@ describe("executeCommand — /enable and /disable admin authorization", () => {
 
     expect(outcome.kind).toBe("handled");
     expect(setChatEnabled).toHaveBeenCalledWith(baseContext.chatId, false);
+  });
+});
+
+// Phase 6 review, Issue 1: once `/disable`'s mutation succeeds, the chat
+// is already disabled, and the webhook drops every further update for it
+// except a valid `/enable` — so a redelivery of *this* update could never
+// reach the command path again to retry the confirmation reply. A
+// transient reply failure at that point must therefore be reclassified
+// as permanent (never released), unlike every other command mutation.
+describe("executeCommand — /disable reply-failure dedupe exception (Phase 6 review, Issue 1)", () => {
+  it("reclassifies a transient reply failure after a successful disable as a PermanentUpstreamError", async () => {
+    const isAdmin = vi.fn().mockResolvedValue(true);
+    const setChatEnabled = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockRejectedValue(new TransientUpstreamError("503", "telegram"));
+
+    const promise = executeCommand(
+      { kind: "parsed", command: { kind: "disable" } },
+      baseContext,
+      boundaries(readBoundary({ isAdmin }), writeBoundary({ setChatEnabled }), sendMessage),
+    );
+
+    await expect(promise).rejects.toBeInstanceOf(PermanentUpstreamError);
+    await expect(promise).rejects.not.toBeInstanceOf(TransientUpstreamError);
+    // The mutation itself already happened — this is the whole point of the exception.
+    expect(setChatEnabled).toHaveBeenCalledWith(baseContext.chatId, false);
+  });
+
+  it("still propagates a permanent reply failure after a successful disable as-is", async () => {
+    const isAdmin = vi.fn().mockResolvedValue(true);
+    const setChatEnabled = vi.fn().mockResolvedValue(undefined);
+    const permanentError = new PermanentUpstreamError("chat not found", "telegram");
+    const sendMessage = vi.fn().mockRejectedValue(permanentError);
+
+    const promise = executeCommand(
+      { kind: "parsed", command: { kind: "disable" } },
+      baseContext,
+      boundaries(readBoundary({ isAdmin }), writeBoundary({ setChatEnabled }), sendMessage),
+    );
+
+    await expect(promise).rejects.toBe(permanentError);
+  });
+
+  it("does not intercept a transient failure in the disable mutation itself (before any reply)", async () => {
+    const isAdmin = vi.fn().mockResolvedValue(true);
+    const mutationError = new TransientUpstreamError("D1 outage", "d1");
+    const setChatEnabled = vi.fn().mockRejectedValue(mutationError);
+    const sendMessage = vi.fn().mockResolvedValue(sentMessage);
+
+    const promise = executeCommand(
+      { kind: "parsed", command: { kind: "disable" } },
+      baseContext,
+      boundaries(readBoundary({ isAdmin }), writeBoundary({ setChatEnabled }), sendMessage),
+    );
+
+    // The original TransientUpstreamError passes through unchanged — a
+    // mutation failure (nothing irreversible happened yet) must still be
+    // retryable, unlike a post-mutation reply failure.
+    await expect(promise).rejects.toBe(mutationError);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not apply the exception to /enable — a transient reply failure stays transient", async () => {
+    const isAdmin = vi.fn().mockResolvedValue(true);
+    const setChatEnabled = vi.fn().mockResolvedValue(undefined);
+    const transientError = new TransientUpstreamError("503", "telegram");
+    const sendMessage = vi.fn().mockRejectedValue(transientError);
+
+    const promise = executeCommand(
+      { kind: "parsed", command: { kind: "enable" } },
+      baseContext,
+      boundaries(readBoundary({ isAdmin }), writeBoundary({ setChatEnabled }), sendMessage),
+    );
+
+    await expect(promise).rejects.toBe(transientError);
+  });
+
+  it("does not intercept a transient reply failure for a denied (non-admin) /disable", async () => {
+    const isAdmin = vi.fn().mockResolvedValue(false);
+    const setChatEnabled = vi.fn().mockResolvedValue(undefined);
+    const transientError = new TransientUpstreamError("503", "telegram");
+    const sendMessage = vi.fn().mockRejectedValue(transientError);
+
+    const promise = executeCommand(
+      { kind: "parsed", command: { kind: "disable" } },
+      baseContext,
+      boundaries(readBoundary({ isAdmin }), writeBoundary({ setChatEnabled }), sendMessage),
+    );
+
+    await expect(promise).rejects.toBe(transientError);
+    expect(setChatEnabled).not.toHaveBeenCalled();
   });
 });

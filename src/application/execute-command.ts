@@ -21,6 +21,7 @@ import {
   type ExplicitSpeakerPreferences,
   type StyleTone,
 } from "../domain/speaker-memory";
+import { PermanentUpstreamError, TransientUpstreamError } from "../shared/errors";
 
 /**
  * Command orchestration use case — Phase 6's counterpart to
@@ -37,6 +38,15 @@ import {
  * `/disable`) are idempotent, so a Telegram redelivery after a transient
  * failure can safely repeat them — see docs/architecture.md, "Command
  * D1 error classification and dedupe".
+ *
+ * `/disable` is the one exception to "reply failure after a successful
+ * mutation releases the dedupe reservation": once `setChatEnabled(...,
+ * false)` succeeds, the webhook's early routing drops every further
+ * update for that chat except a valid `/enable`, so a Telegram
+ * redelivery of *this* update could never reach the command path again
+ * to retry the confirmation reply. See the `enable`/`disable` case below
+ * and docs/architecture.md, "`/disable` reply-failure dedupe exception"
+ * (Phase 6 review, Issue 1).
  */
 
 export interface SentMessageInfo {
@@ -291,12 +301,35 @@ export async function executeCommand(
       }
       const enabled = command.kind === "enable";
       await boundaries.write.setChatEnabled(context.chatId, enabled);
-      const sentMessage = await reply(
-        boundaries,
-        context,
-        enabled ? CHAT_ENABLED_TEXT : CHAT_DISABLED_TEXT,
-      );
-      return { kind: "handled", sentMessage };
+      const confirmationText = enabled ? CHAT_ENABLED_TEXT : CHAT_DISABLED_TEXT;
+
+      if (enabled) {
+        const sentMessage = await reply(boundaries, context, confirmationText);
+        return { kind: "handled", sentMessage };
+      }
+
+      // `/disable`: the mutation above already succeeded, so the chat is
+      // disabled now — a Telegram redelivery of this same update can
+      // never reach this command path again (the webhook drops every
+      // update for a disabled chat except a valid `/enable`). Releasing
+      // the dedupe reservation on a *transient* reply failure here would
+      // therefore strand the confirmation forever instead of making it
+      // retryable, unlike every other command. Reclassify a transient
+      // reply failure as permanent so the webhook's
+      // `error instanceof TransientUpstreamError` check keeps the
+      // reservation instead — see docs/architecture.md, "`/disable`
+      // reply-failure dedupe exception" (Phase 6 review, Issue 1). A
+      // permanent Telegram failure already keeps the reservation without
+      // this, so it passes through unchanged.
+      try {
+        const sentMessage = await reply(boundaries, context, confirmationText);
+        return { kind: "handled", sentMessage };
+      } catch (error) {
+        if (error instanceof TransientUpstreamError) {
+          throw new PermanentUpstreamError(error.message, error.service);
+        }
+        throw error;
+      }
     }
   }
 }

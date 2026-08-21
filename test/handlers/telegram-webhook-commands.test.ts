@@ -844,6 +844,31 @@ describe("POST /telegram/webhook — admin authorization", () => {
     await expect(response.json()).resolves.toMatchObject({ outcome: "ignored:not-allowlisted" });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  // Phase 6 review, Issue 2: "/enable garbage" is a usage-error, not a
+  // valid parsed /enable — a disabled chat must never let it through the
+  // /enable exception, even for an admin caller. No admin lookup, no D1
+  // mutation, no Telegram reply, and no dedupe reservation.
+  it("a known disabled chat drops '/enable garbage' — never a valid parsed /enable, even for an admin", async () => {
+    await allowlistChat(CHAT_ID, false);
+    await makeAdmin(USER_ID);
+    const fetchSpy = mockFetchDispatch({});
+    const updateId = 950000046;
+
+    const response = await callWorker(
+      webhookRequest(buildUpdate({ updateId, text: "/enable garbage" })),
+      testEnv(),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ outcome: "ignored:not-allowlisted" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const row = await env.DB.prepare("SELECT enabled FROM allowed_chats WHERE chat_id = ?1")
+      .bind(CHAT_ID)
+      .first<number>("enabled");
+    expect(row).toBe(0);
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(false);
+  });
 });
 
 describe("POST /telegram/webhook — commands never invoke OpenAI or the observed-style write path", () => {
@@ -1008,6 +1033,92 @@ describe("POST /telegram/webhook — command dedupe and retry semantics", () => 
       .bind(CHAT_ID, USER_ID)
       .first<string>("preference_value");
     expect(row).toBe("formal");
+  }, 15000);
+});
+
+// Phase 6 review, Issue 1: once `/disable`'s D1 mutation succeeds, the
+// chat is already disabled, so a Telegram redelivery of this same update
+// can never reach the command path again (the webhook drops every update
+// for a disabled chat except a valid /enable). A transient reply failure
+// at that point must therefore keep the dedupe reservation instead of
+// releasing it — unlike every other command mutation, including /enable.
+describe("POST /telegram/webhook — /disable reply-failure dedupe exception (Phase 6 review, Issue 1)", () => {
+  it("releases the dedupe reservation on a transient D1 failure in the disable mutation itself, and a redelivery then succeeds", async () => {
+    await allowlistChat(CHAT_ID, true);
+    await makeAdmin(USER_ID);
+    const updateId = 950000047;
+    const failingPrepare = mockD1PrepareFailureFor("UPDATE allowed_chats");
+    const fetchSpy = mockFetchDispatch({});
+
+    const first = await callWorker(
+      webhookRequest(buildUpdate({ updateId, text: "/disable" })),
+      testEnv(),
+    );
+    expect(first.status).toBe(500);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const rowAfterFirst = await env.DB.prepare(
+      "SELECT enabled FROM allowed_chats WHERE chat_id = ?1",
+    )
+      .bind(CHAT_ID)
+      .first<number>("enabled");
+    expect(rowAfterFirst).toBe(1);
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(false);
+    failingPrepare.mockRestore();
+
+    mockFetchDispatch({ telegram: () => Promise.resolve(telegramSendMessageResponse()) });
+    const second = await callWorker(
+      webhookRequest(buildUpdate({ updateId, text: "/disable" })),
+      testEnv(),
+    );
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({ outcome: "command:handled" });
+    const rowAfterSecond = await env.DB.prepare(
+      "SELECT enabled FROM allowed_chats WHERE chat_id = ?1",
+    )
+      .bind(CHAT_ID)
+      .first<number>("enabled");
+    expect(rowAfterSecond).toBe(0);
+  });
+
+  it("keeps the dedupe reservation on a transient Telegram reply failure after the disable mutation succeeds", async () => {
+    await allowlistChat(CHAT_ID, true);
+    await makeAdmin(USER_ID);
+    const updateId = 950000048;
+    const telegramHandler = vi.fn((_url: string, _init: RequestInit) =>
+      Promise.resolve(jsonResponse({ ok: false, error_code: 503 }, 503)),
+    );
+    mockFetchDispatch({ telegram: telegramHandler });
+
+    const response = await callWorker(
+      webhookRequest(buildUpdate({ updateId, text: "/disable" })),
+      testEnv(),
+    );
+
+    expect(response.status).toBe(500);
+    // The mutation already succeeded — the chat is disabled now, even
+    // though the confirmation reply failed.
+    const row = await env.DB.prepare("SELECT enabled FROM allowed_chats WHERE chat_id = ?1")
+      .bind(CHAT_ID)
+      .first<number>("enabled");
+    expect(row).toBe(0);
+    // Unlike a normal command, the reservation is KEPT — not released —
+    // because a redelivery could never reach the command path again now
+    // that this chat is disabled (only /enable would get through).
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(true);
+    expect(telegramHandler).toHaveBeenCalledTimes(1);
+
+    // A redelivery of the same update_id is now a harmless duplicate —
+    // routing never reaches the command path again (disabled chat, and
+    // this update's text is /disable, not /enable) — so the reply is
+    // never retried, exactly as intended.
+    telegramHandler.mockClear();
+    const redelivery = await callWorker(
+      webhookRequest(buildUpdate({ updateId, text: "/disable" })),
+      testEnv(),
+    );
+    expect(redelivery.status).toBe(200);
+    await expect(redelivery.json()).resolves.toMatchObject({ outcome: "ignored:not-allowlisted" });
+    expect(telegramHandler).not.toHaveBeenCalled();
   }, 15000);
 });
 

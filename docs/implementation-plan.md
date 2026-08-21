@@ -312,6 +312,25 @@ check` green (423 tests) and CI green. The remote `0003_commands.sql`
 migration has **not** been applied — verified with `--local` only, same
 as `0002_speaker_memory.sql` (Phase 8).
 
+**Review hardening (post-completion, same phase):** an independent
+review found two edge cases, both fixed without changing Phase 6's
+scope or design — `npm run check` green (439 tests) and CI green:
+
+1. `/disable`'s Telegram reply failing _after_ its D1 mutation already
+   succeeded used to release the dedupe reservation like any other
+   command, but a redelivery could never actually reach the command path
+   again (the chat is disabled now, and the webhook drops every update
+   for a disabled chat except a valid `/enable`) — so the reservation is
+   now kept instead, specifically for that one case (`/enable` and every
+   other command are unaffected). See docs/architecture.md, "`/disable`
+   reply-failure dedupe exception".
+2. `/help`, `/status`, `/profile`, `/enable`, and `/disable` used to
+   silently ignore a trailing argument (e.g. `/enable garbage` parsed as
+   a valid `/enable`); they now reject it as a `usage-error`, which also
+   closes a gap where such an argument could otherwise have been
+   misread as a valid `/enable` by the disabled-chat exception. See
+   `src/commands/parse-command.ts`.
+
 - **目的:** Implement the Telegram command surface for status, profile
   management, memory management, and admin control.
 - **実装内容:** `commands/` implementations for `/status`, `/profile`,

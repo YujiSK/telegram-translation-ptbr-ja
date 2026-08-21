@@ -45,6 +45,67 @@ describe("parseCommandMessage — recognized no-argument commands", () => {
       command: { kind: "disable" },
     });
   });
+
+  it("parses /enable@SomeBotName the same as /enable", () => {
+    expect(parseCommandMessage("/enable@SomeBotName")).toEqual({
+      kind: "parsed",
+      command: { kind: "enable" },
+    });
+  });
+});
+
+// Phase 6 review, Issue 2: a no-argument command with a trailing
+// argument (e.g. "/status extra") must be a usage-error, not a normal
+// invocation with the extra text silently ignored. This matters most for
+// "/enable garbage" on a disabled chat — it must never be treated as a
+// valid parsed /enable by the webhook's disabled-chat exception.
+describe("parseCommandMessage — no-argument commands reject trailing arguments", () => {
+  it("rejects /help with a trailing argument", () => {
+    expect(parseCommandMessage("/help x")).toEqual({
+      kind: "usage-error",
+      message: "Usage: /help",
+    });
+  });
+
+  it("rejects /status with a trailing argument", () => {
+    expect(parseCommandMessage("/status x")).toEqual({
+      kind: "usage-error",
+      message: "Usage: /status",
+    });
+  });
+
+  it("rejects /profile with a trailing argument", () => {
+    expect(parseCommandMessage("/profile x")).toEqual({
+      kind: "usage-error",
+      message: "Usage: /profile",
+    });
+  });
+
+  it("rejects /enable with a trailing argument", () => {
+    expect(parseCommandMessage("/enable x")).toEqual({
+      kind: "usage-error",
+      message: "Usage: /enable",
+    });
+  });
+
+  it("rejects /disable with a trailing argument", () => {
+    expect(parseCommandMessage("/disable x")).toEqual({
+      kind: "usage-error",
+      message: "Usage: /disable",
+    });
+  });
+
+  it("rejects /enable garbage — never a valid parsed /enable", () => {
+    const result = parseCommandMessage("/enable garbage");
+    expect(result.kind).toBe("usage-error");
+  });
+
+  it("rejects a no-argument command with a trailing argument even with a bot-name suffix", () => {
+    expect(parseCommandMessage("/status@SomeBotName extra")).toEqual({
+      kind: "usage-error",
+      message: "Usage: /status",
+    });
+  });
 });
 
 describe("parseCommandMessage — unknown command", () => {

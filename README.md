@@ -24,7 +24,7 @@ OpenAI. The webhook verifies Telegram's Secret header, gates messages
 through the allowlist/dedupe tables, then routes to either the command
 path or (for ordinary text) the speaker-memory-informed translation
 path — all tested against mocked OpenAI/Telegram HTTP responses and
-local D1 (423 tests); no real OpenAI/Telegram API call has been made,
+local D1 (439 tests); no real OpenAI/Telegram API call has been made,
 and the Phase 5/6 migrations have been applied only locally. No Telegram
 bot has been created, no Secret is registered, the Worker is not
 deployed, and no webhook is registered with Telegram — those four
