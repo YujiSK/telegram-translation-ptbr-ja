@@ -40,6 +40,16 @@ SETUP_ADMIN_SECRET
 - **In logs:** Secret values are never logged, not even partially, not
   even in error messages.
 
+**Phase 8 Secret handling:** all four Secrets remain unregistered as of
+Phase 8A — Phase 8A only prepares the registration runbook
+(docs/operations.md, "Secret registration runbook") and the code paths
+that read each Secret (all already fail-safe when the Secret is absent —
+see each Secret's own verification section above). No Secret value is
+generated, registered, or otherwise handled by Phase 8A itself; every
+`wrangler secret put` invocation, and any Secret generation, is a Phase
+8B action, each requiring its own separate approval (docs/operations.md,
+"External action approval matrix", approval units B–E).
+
 ## Telegram Webhook Secret verification
 
 Implemented: `POST /telegram/webhook` verifies Telegram's
@@ -48,10 +58,77 @@ Implemented: `POST /telegram/webhook` verifies Telegram's
 JSON parse, or D1 access. A missing header, a mismatched value, or an
 unconfigured/empty `TELEGRAM_WEBHOOK_SECRET` are all rejected with 401
 (fail closed). The comparison uses the Workers-runtime
-`crypto.subtle.timingSafeEqual` extension. The webhook endpoint itself is
-not registered with Telegram until Phase 8 per the implementation plan —
-this code path only runs when the real webhook (or a test) sends a
-request to it.
+`crypto.subtle.timingSafeEqual` extension, via the shared
+`timingSafeEqualStrings` helper (`src/shared/secret-compare.ts`, factored
+out in Phase 8A — see "Bootstrap Secret verification" below). The webhook
+endpoint itself is not registered with Telegram until Phase 8B per the
+implementation plan — this code path only runs when the real webhook (or
+a test) sends a request to it.
+
+## Bootstrap Secret verification (Phase 8A)
+
+**Implemented:** `POST /admin/bootstrap` verifies a dedicated
+`X-Setup-Admin-Secret` header against `SETUP_ADMIN_SECRET`
+(`src/infrastructure/admin/setup-secret.ts`) before any body read or D1
+access — the same fail-closed contract as the Telegram webhook Secret
+above (missing header, mismatched value, or an unconfigured/empty
+`SETUP_ADMIN_SECRET` all reject with a generic 401), using the same
+shared `timingSafeEqualStrings` comparison. A dedicated header, not
+`Authorization: Bearer`, was chosen deliberately: it keeps this Secret's
+request shape independent of any future Authorization-based scheme this
+Worker might add for an unrelated purpose. This check is a separate
+module from the Telegram webhook Secret check on purpose — the two
+Secrets authenticate different callers (Telegram's servers vs. a human
+operator) for different endpoints, and merging the responsibility would
+make a future change to either check risk silently breaking the other.
+See docs/architecture.md, "Bootstrap endpoint".
+
+## Bootstrap endpoint threat model (Phase 8A)
+
+`POST /admin/bootstrap` is a new, distinct entry point into this Worker,
+so it gets its own threat-model pass rather than inheriting the
+Telegram-webhook one by assumption:
+
+- **Unauthenticated/forged request:** rejected 401 before any body read
+  or D1 access, identical in structure to the Telegram webhook Secret
+  check — see "Bootstrap Secret verification" above. Covered by
+  `test/handlers/admin-bootstrap.test.ts`, "authentication".
+- **Secret brute-forcing:** mitigated the same way as
+  `TELEGRAM_WEBHOOK_SECRET` — a constant-time comparison
+  (`timingSafeEqualStrings`) and the expectation that `SETUP_ADMIN_SECRET`
+  is generated with sufficient entropy (see "Secret generation" in
+  docs/operations.md); this repository does not implement request-level
+  throttling for `/admin/bootstrap` specifically, since it is intended to
+  be called a handful of times around a deploy, not continuously like the
+  webhook.
+- **Privilege escalation via the request body:** `adminUserId`/`chatId`
+  are the only fields this endpoint reads (`src/domain/bootstrap.ts`);
+  extra fields are parsed and discarded, never passed through to D1 or
+  reflected in the response, so there is no way to smuggle additional
+  mutations or additional response content through the body.
+- **Replay of a captured valid request:** low-severity by design — the
+  mutation is idempotent (see docs/data-model.md, "Phase 8A
+  bootstrap-endpoint design decisions"), so replaying a previously-valid
+  bootstrap request only re-confirms the same `bot_admins`/`allowed_chats`
+  state; it cannot register a second admin or a second chat from a single
+  captured request, and it cannot be used to _disable_ anything (the
+  chat-enable direction is one-way: `enabled = 1` only).
+- **Information leak via the response or logs:** a successful response
+  never echoes `adminUserId`/`chatId`; every error response is one of
+  three fixed generic bodies, never a raw D1 error; the structured log
+  line for this endpoint never includes `adminUserId`, `chatId`, the
+  Secret, or a raw error message — see "Log minimization" below and
+  `test/handlers/admin-bootstrap.test.ts`, "structured logging".
+- **Attack-surface persistence after go-live:** this endpoint is
+  designed to remain safe to leave deployed indefinitely (strong Secret
+  auth, no destructive action, idempotent, limited to an admin+chat
+  upsert) — see docs/operations.md for the operational decision on
+  whether to disable it after the Phase 9 pilot.
+- **SQL injection via the request body:** not applicable —
+  `adminUserId`/`chatId` are validated as safe integers before ever
+  reaching D1, and every D1 statement in `bootstrapAdminAndChat` is
+  parameterized (docs/project-rules.md rule 3); there is no string field
+  in this endpoint's contract at all.
 
 ## Chat allowlist
 
@@ -76,14 +153,22 @@ Telegram itself, since that can change without the bot's knowledge.
   `/disable` mutates `allowed_chats` — a non-admin caller gets a generic
   "This command is restricted to bot admins." reply with no detail about
   the mechanism, per the response-policy rule below.
-- **Production bootstrap deferred to Phase 8:** Phase 6 implements only
-  the read path against `bot_admins`. There is no command or route in
-  Phase 6 that inserts a row — self-service admin grants would be a
-  privilege-escalation risk. Registering the repository's real initial
-  admin (Yuji's own Telegram user ID) and any future
-  `SETUP_ADMIN_SECRET`-gated bootstrap endpoint both remain Phase 8
-  actions, requiring the same explicit approval as any other external
-  setup step.
+- **No Telegram command ever writes `bot_admins`.** There is still no
+  in-Telegram command or route that inserts a row — self-service admin
+  grants would be a privilege-escalation risk. This is a permanent
+  property, not a Phase 6 gap: `/enable`/`/disable`/every other command
+  in `src/application/execute-command.ts` only ever _reads_
+  `bot_admins`.
+- **Production bootstrap: implemented locally in Phase 8A, not yet used.**
+  `POST /admin/bootstrap` (`SETUP_ADMIN_SECRET`-gated — see "Bootstrap
+  Secret verification" below) is the one sanctioned write path for
+  `bot_admins`, deliberately outside the Telegram command surface
+  entirely. Phase 8A implements and tests this endpoint against local D1
+  only. Actually calling it against the remote database to register the
+  repository's real initial admin (Yuji's own Telegram user ID) remains a
+  Phase 8B action, requiring the same explicit approval as any other
+  external setup step — see docs/operations.md, "External action
+  approval matrix", approval unit G.
 - **No real Telegram user ID is committed for this purpose:** every
   `bot_admins` fixture in this repository's tests uses an obviously
   synthetic ID.
@@ -136,6 +221,14 @@ a future call site could accidentally widen.
   via an injected sink / a `console.log` spy and assert that identifiable
   synthetic message text, Secrets, and raw error messages never appear in
   it.
+- **Phase 8A — no-ID logging for the bootstrap endpoint:** unlike the
+  Telegram webhook path (which may legitimately log a `chatId` for
+  operational triage), `POST /admin/bootstrap`'s structured log line
+  (`event: "admin_bootstrap"`) never includes the submitted `adminUserId`
+  or `chatId` — `src/handlers/admin-bootstrap.ts`'s own `finish()` helper
+  is typed to omit both fields entirely, so passing either is a compile
+  error, not a discipline problem left to code review. Verified by
+  `test/handlers/admin-bootstrap.test.ts`, "structured logging".
 
 ## Data deletion
 
@@ -236,6 +329,27 @@ chat-minute-then-daily reservation ordering). All three limit values are
 non-secret `wrangler.jsonc` vars — safe to tune after the Phase 9 pilot
 without a code change; see `README.md`.
 
+## Webhook registration strategy (Phase 8A decision)
+
+**No runtime `setWebhook` endpoint is implemented in this Worker.**
+Telegram webhook registration is a one-time operation per deploy, not a
+recurring one — keeping a privileged endpoint that calls the Telegram
+Bot API with the bot token permanently reachable in production for an
+operation needed once would add attack surface (another
+Secret-authenticated route that can make an outbound privileged API call)
+for no ongoing benefit. Instead, webhook registration is documented as an
+operator-run manual `setWebhook` call in docs/operations.md, "First
+deployment order" — the same `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_WEBHOOK_SECRET` Secrets that endpoint would have needed are
+already available to whoever is performing the deploy. This intentionally
+differs from an earlier framing in `docs/implementation-plan.md` Phase 8
+("a webhook-setup step, gated behind `SETUP_ADMIN_SECRET`") — that
+framing is superseded by this decision: `SETUP_ADMIN_SECRET` is used
+for the bootstrap endpoint (admin/chat provisioning) only, and webhook
+registration itself is a manual operator action, not a second runtime
+endpoint. No real Telegram API call is made by this repository's code or
+tests either way.
+
 ## Timeouts and retries
 
 - Every external call (Telegram Bot API, OpenAI API) has an explicit
@@ -303,10 +417,14 @@ Because this bot processes real family conversations:
 **Verification status: every row below was re-verified by the Phase 7
 security regression pass** (`test/handlers/telegram-webhook-security.test.ts`,
 plus the pre-existing tests each row's "Verified by" column names) — see
-`docs/implementation-plan.md` Phase 7.
+`docs/implementation-plan.md` Phase 7. The two bootstrap-specific rows
+were added by Phase 8A — see "Bootstrap endpoint threat model" above for
+the full per-threat breakdown.
 
 | Threat                             | Mitigation                                                                                                                                          | Verified by                                                                                                                                                                          |
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Forged bootstrap request           | `SETUP_ADMIN_SECRET` header verification, before any body read/D1 access (Phase 8A)                                                                 | `admin-bootstrap.test.ts`, "authentication" (401, before any fetch or D1 access)                                                                                                     |
+| Unauthorized production bootstrap  | Bootstrap mutation is idempotent, admin-only, chat-enable-only (never disables), and every field is validated before reaching D1 (Phase 8A)         | `admin-bootstrap.test.ts`, "request validation" and "successful bootstrap"; `bootstrap.test.ts` (repository-level idempotency)                                                       |
 | Secret leak via commit             | Public-repo posture above; `.dev.vars` gitignored; Secrets never in `wrangler.jsonc`                                                                | Manual repo inspection (Phase 7 final verification); log-leak tests below confirm Secrets never reach logs either                                                                    |
 | Unauthorized chat usage            | Chat allowlist (`allowed_chats`) checked before any processing, before dedupe/rate counters                                                         | `telegram-webhook.test.ts` (unknown/disabled chat, 200 safe drop); `telegram-webhook-security.test.ts` (no `rate_limit_counters` row created for either case)                        |
 | Unauthorized admin action          | Explicit admin authorization check on `/enable`, `/disable`, etc.                                                                                   | `telegram-webhook-commands.test.ts`, "admin authorization" (non-admin caller ⇒ no mutation, `command:forbidden`)                                                                     |

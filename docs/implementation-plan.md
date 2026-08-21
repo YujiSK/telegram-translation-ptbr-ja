@@ -1,6 +1,9 @@
 # Implementation Plan
 
-**Current phase: Phase 7 completed; Phase 8 not started.** OpenAI
+**Current phase: Phase 7 completed; Phase 8A (deployment preparation)
+completed — every external action deferred to Phase 8B, pending its own
+separate approval; Phase 8 as a whole is not Completed. Phase 9 not
+started.** OpenAI
 translation local implementation: Completed. Structured Outputs mock
 tests: Completed. Telegram reply orchestration mock tests: Completed.
 Speaker Memory local schema: Completed. Memory repository: Completed.
@@ -14,13 +17,20 @@ daily OpenAI attempt limits, structured logging, security regression
 tests): Completed, local schema (`migrations/0004_reliability.sql`,
 `rate_limit_counters`, `openai_daily_usage`) and mock/local D1 tests
 only. Remote `0002_speaker_memory.sql`, `0003_commands.sql`, and
-`0004_reliability.sql` migrations: Pending until Phase 8. Real family
-profile data: Not stored (only synthetic fixtures exist in tests). Real
-OpenAI/Telegram API test: Not performed (all Phase 4/5/6/7 tests use a
-mocked OpenAI/Telegram HTTP response, per design). Telegram Bot creation,
-Cloudflare Secret registration, Worker deployment, and Telegram webhook
-registration: Pending until Phase 8 — see Phase 3, Phase 4, Phase 5,
-Phase 6, Phase 7, and Phase 8 below.
+`0004_reliability.sql` migrations: Pending until Phase 8B. Deployment
+preparation (production bootstrap endpoint `POST /admin/bootstrap`,
+deployment/migration/Secret-registration/webhook-registration runbooks,
+external-action approval matrix): Completed (Phase 8A), local schema
+unchanged (no new migration — see `migrations/0004_reliability.sql`
+above) and mock/local D1 tests only. Real family profile data: Not
+stored (only synthetic fixtures exist in tests). Real OpenAI/Telegram
+API test: Not performed (all Phase 4/5/6/7/8A tests use a mocked
+OpenAI/Telegram HTTP response, per design). Telegram Bot creation,
+Cloudflare Secret registration, remote D1 migrations, production
+admin/chat bootstrap, Worker deployment, and Telegram webhook
+registration: all Pending Phase 8B, each requiring its own separate
+approval — see Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, and Phase 8
+below.
 
 Rule for every phase (see `docs/project-rules.md` rules 13–14): implement
 one phase at a time, verify with `npm run check` before moving to the
@@ -459,46 +469,100 @@ Pending until Phase 8, unchanged from Phase 6.
 
 ## Phase 8 — Deployment preparation
 
-**This is the phase that owns the four external actions deferred since
-Phase 3:** creating the Telegram bot (BotFather), registering
+**This is the phase that owns the nine external actions deferred since
+Phase 3** (see `docs/operations.md`, "External action approval matrix",
+units A–I: Telegram bot creation; registering
 `OPENAI_API_KEY`/`TELEGRAM_BOT_TOKEN`/`TELEGRAM_WEBHOOK_SECRET`/
-`SETUP_ADMIN_SECRET` as real Cloudflare Secrets, deploying the Worker,
-and registering the Telegram webhook. None of them happen automatically
-just because Phase 8 starts — each one is still a separate,
-explicit-approval action per `CLAUDE.md`; Phase 8 is where they're
-documented and, once approved individually, performed.
+`SETUP_ADMIN_SECRET` as real Cloudflare Secrets — four separate units;
+applying the pending remote D1 migrations; the production admin/chat
+bootstrap; deploying the Worker; and registering the Telegram webhook).
+None of them happen automatically just because Phase 8 starts — each one
+is still a separate, explicit-approval action per `CLAUDE.md`. Phase 8 is
+split into two sub-phases, tracked separately because their risk profile
+is completely different: **Phase 8A** (preparation — code, tests, and
+runbooks only, zero external side effects) and **Phase 8B** (the nine
+external actions themselves, each performed only after its own separate
+approval).
+
+**Phase 8A status: completed.** Implemented as
+`src/handlers/admin-bootstrap.ts` (the `POST /admin/bootstrap`
+production-bootstrap endpoint, routed in `src/index.ts` completely
+separately from `/telegram/webhook`), composed from three new modules:
+`src/infrastructure/admin/setup-secret.ts` (the `X-Setup-Admin-Secret`
+header check, `SETUP_ADMIN_SECRET`-gated, fail-closed before any body
+read or D1 access), `src/domain/bootstrap.ts` (the pure
+`adminUserId`/`chatId` request parser), and
+`src/infrastructure/d1/bootstrap.ts` (`bootstrapAdminAndChat`, one
+atomic idempotent `db.batch()` upsert into the existing `bot_admins` and
+`allowed_chats` tables — no new migration). The Telegram webhook Secret
+check's timing-safe comparison was factored out into
+`src/shared/secret-compare.ts` so both Secret checks share one audited
+implementation. `docs/operations.md` is now the deployment runbook's
+canonical source: the external-action approval matrix, first-deployment
+ordering, Telegram bot creation steps, a per-Secret registration runbook
+(source/registration/verification/rotation/revoke for each of the four
+Secrets), the Secret-generation requirements (values not yet generated),
+the remote-migration runbook (plus rollback/backup-check guidance), the
+Worker-deployment runbook (predeploy checklist), real-Telegram-ID
+acquisition guidance, the bootstrap-call procedure, the webhook
+-registration runbook (a documented manual operator `setWebhook` call,
+not a second runtime endpoint — see `docs/security-and-privacy.md`,
+"Webhook registration strategy", for why no such endpoint was built),
+post-deploy smoke checks, an emergency-stop procedure, and the
+auto-deploy non-decision (not implemented before the Phase 9 pilot).
+`npm run check` green (583 tests) and CI green. **Zero external side
+effects performed:** no real Telegram bot, no real Secret, no remote D1
+mutation, no real admin/chat ID, no Worker deploy, no webhook
+registration — every runbook command in `docs/operations.md` uses only
+`<PLACEHOLDER>` values.
 
 - **目的:** Make the project ready to deploy, and — once each step is
   separately approved — perform the deferred external setup: bot
-  creation, Secret registration, Worker deployment, and webhook
-  registration.
-- **実装内容:** Finalize Cloudflare Binding configuration in
-  `wrangler.jsonc` (D1, and anything else needed); document the exact
-  Secret-registration steps (`wrangler secret put` for each of the four
-  planned Secrets); document the D1 migration-apply procedure for a real
-  (non-local) database; propose (design only, or implement if explicitly
-  approved) a GitHub → Cloudflare auto-deploy workflow; design the
-  webhook-setup step, gated behind `SETUP_ADMIN_SECRET`. Then, only after
-  explicit approval for each individual action: create the Telegram bot,
-  run `wrangler secret put` for each Secret, run `wrangler deploy`, and
-  register the Telegram webhook.
-- **前提条件:** Phase 7 complete.
-- **完了条件:** A documented, reviewed runbook exists for every step
-  above; the bot exists, all four Secrets are registered, the Worker is
+  creation, Secret registration, remote migrations, production
+  admin/chat bootstrap, Worker deployment, and webhook registration.
+- **実装内容 (Phase 8A, completed):** the `POST /admin/bootstrap`
+  endpoint and its tests (local D1 only); the full deployment runbook in
+  `docs/operations.md`; the external-action approval matrix; the
+  Secret-registration and Secret-generation runbooks (commands
+  documented, no real value generated or registered); the remote
+  D1 migration-apply runbook (commands documented, `--remote` not run);
+  the webhook-registration design decision (manual operator call, no new
+  runtime endpoint). **実装内容 (Phase 8B, not started):** only after
+  explicit approval for each individual action — create the Telegram
+  bot, run `wrangler secret put` for each of the four Secrets, run
+  `wrangler d1 migrations apply --remote` for `0002`/`0003`/`0004`, call
+  the deployed `/admin/bootstrap` with real IDs, run `wrangler deploy`,
+  and register the Telegram webhook.
+- **前提条件:** Phase 7 complete (Phase 8A); Phase 8A complete plus each
+  individual action's own separate approval (Phase 8B, per action).
+- **完了条件 (Phase 8A, reached):** a documented, reviewed runbook exists
+  for every Phase 8B step; the bootstrap endpoint is implemented and
+  tested against local D1; `npm run check` green; no external action
+  performed. **完了条件 (Phase 8B, not reached):** the bot exists, all
+  four Secrets are registered, the three pending migrations are applied
+  remotely, the production admin/chat is bootstrapped, the Worker is
   deployed, and the webhook is registered — each performed only after
   its own explicit separate approval, per `CLAUDE.md`.
-- **テスト:** Any new endpoint (e.g., webhook-setup) gets the same
-  unit/integration test treatment as prior phases, run against local
-  dev before any real deploy.
-- **Yujiによる手動作業:** Approve each external action individually
-  (bot creation, each Secret, the deploy, the webhook registration) —
-  these are exactly the "external service changes" that require
-  explicit approval per `CLAUDE.md`; approving one does not imply
-  approval for the others.
-- **次フェーズへ進む前の停止点:** Stop before any real `wrangler deploy`
-  to production, any real `wrangler secret put`, and any real Telegram
-  webhook registration — all require Yuji's explicit go-ahead, granted
-  separately from this plan.
+- **テスト:** The bootstrap endpoint gets the same unit/integration test
+  treatment as prior phases' endpoints, run against local D1 only
+  (`test/domain/bootstrap.test.ts`,
+  `test/infrastructure/admin/setup-secret.test.ts`,
+  `test/infrastructure/d1/bootstrap.test.ts`,
+  `test/handlers/admin-bootstrap.test.ts`) — never against a real deploy.
+- **Yujiによる手動作業:** Approve each of the nine Phase 8B external
+  actions individually (bot creation, each of the four Secrets, the
+  remote migrations, the production bootstrap call, the deploy, the
+  webhook registration) — these are exactly the "external service
+  changes" that require explicit approval per `CLAUDE.md`; approving one
+  does not imply approval for any other, even where "First deployment
+  order" in `docs/operations.md` lists them in a specific sequence.
+- **次フェーズへ進む前の停止点:** Phase 8A reached and stopped here, as
+  instructed. Stop before any real `wrangler deploy` to production, any
+  real `wrangler secret put`, any real `wrangler d1 migrations apply
+--remote`, any real call to the deployed `/admin/bootstrap`, and any
+  real Telegram webhook registration — all Phase 8B, all requiring
+  Yuji's explicit go-ahead per action, granted separately from this
+  plan.
 
 ---
 
@@ -513,7 +577,7 @@ documented and, once approved individually, performed.
   compare translation quality/behavior with and without speaker memory
   enabled, to confirm Phase 5 is actually adding value; produce a
   go/no-go recommendation for broader "production" use.
-- **前提条件:** Phase 8 complete, and Yuji has explicitly approved and
+- **前提条件:** Phase 8 complete (both 8A and 8B), and Yuji has explicitly approved and
   performed the real deploy + webhook registration.
 - **完了条件:** Pilot test cases run and results recorded; cost figures
   captured; a written go/no-go recommendation exists.

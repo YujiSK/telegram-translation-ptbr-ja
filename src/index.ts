@@ -1,8 +1,13 @@
 /**
- * Phase 3: adds the Telegram webhook boundary. OpenAI translation and
- * reply-posting are not wired in yet — see docs/implementation-plan.md.
+ * Phase 3 adds the Telegram webhook boundary; Phase 8A adds the
+ * `POST /admin/bootstrap` production-setup endpoint (`SETUP_ADMIN_SECRET`
+ * -gated, deliberately routed and processed completely separately from
+ * `/telegram/webhook` — see src/handlers/admin-bootstrap.ts). Neither
+ * endpoint's request ever flows through the other's dedupe/rate-limit
+ * machinery.
  */
 
+import { handleAdminBootstrap } from "./handlers/admin-bootstrap";
 import { handleTelegramWebhook } from "./handlers/telegram-webhook";
 
 interface ErrorBody {
@@ -36,6 +41,10 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/telegram/webhook") {
       return await handleTelegramWebhook(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/admin/bootstrap") {
+      return await handleAdminBootstrap(request, env);
     }
 
     return notFound();

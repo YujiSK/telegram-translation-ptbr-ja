@@ -1,13 +1,14 @@
 # Architecture
 
 Status: **Foundation, domain, D1 repository layer, the Telegram webhook
-boundary, OpenAI translation, speaker memory, the command surface, and
-reliability/security hardening are implemented (Phase 7 complete).**
-`POST /telegram/webhook` verifies the Secret header, parses the Update,
-detects a command (if any), gates on the allowed-chat state and dedupe
-tables, applies the per-chat inbound rate limit (see "Rate limiting and
-usage ceilings" below), and then routes to one of two completely
-separate paths:
+boundary, OpenAI translation, speaker memory, the command surface,
+reliability/security hardening, and Phase 8A deployment-preparation
+tooling are implemented (Phase 8A complete; Phase 8B external actions
+pending separate approval).** `POST /telegram/webhook` verifies the
+Secret header, parses the Update, detects a command (if any), gates on
+the allowed-chat state and dedupe tables, applies the per-chat inbound
+rate limit (see "Rate limiting and usage ceilings" below), and then
+routes to one of two completely separate paths:
 
 - **Command path** (Phase 6): reads speaker memory only for `/status`
   and `/profile`'s own display (never for a translation), mutates
@@ -25,16 +26,20 @@ separate paths:
   posts the reply and best-effort records the observed style. See
   `src/application/translate-and-reply.ts`.
 
-Both paths are orchestrated from `src/handlers/telegram-webhook.ts`.
-Every OpenAI/Telegram call in tests is mocked; no real OpenAI/Telegram
-API call has been made, and the Phase 5, Phase 6, and Phase 7 D1
-migrations (`migrations/0002_speaker_memory.sql`,
-`migrations/0003_commands.sql`, `migrations/0004_reliability.sql`) have
-each been applied and tested only locally, not against the remote
-database. No Telegram bot has been created, no Secret is registered, no
-webhook is registered with Telegram, and the Worker is not deployed —
-those four actions, plus the remote migrations, are deferred to Phase 8.
-See `docs/implementation-plan.md` for phasing.
+Both paths are orchestrated from `src/handlers/telegram-webhook.ts`. A
+third, completely separate endpoint — `POST /admin/bootstrap` — exists
+for production setup only; see "Bootstrap endpoint" below. Every
+OpenAI/Telegram call in tests is mocked; no real OpenAI/Telegram API call
+has been made, and the Phase 5, Phase 6, and Phase 7 D1 migrations
+(`migrations/0002_speaker_memory.sql`, `migrations/0003_commands.sql`,
+`migrations/0004_reliability.sql`) have each been applied and tested only
+locally, not against the remote database. No Telegram bot has been
+created, no Secret is registered, no webhook is registered with
+Telegram, and the Worker is not deployed — those four actions, plus the
+remote migrations and the production admin/chat bootstrap itself, are
+deferred to Phase 8B, each requiring its own separate explicit approval
+(see docs/operations.md, "External action approval matrix"). See
+`docs/implementation-plan.md` for phasing.
 
 ## Request flow (target design)
 
@@ -595,6 +600,101 @@ ordering, Command routing and chat state, Dedupe and retry) — it exists
 as a single consolidated reference, added by the Phase 7 security
 regression pass, and every row is cross-checked against those sections by
 name so the two never drift silently out of sync.
+
+## Bootstrap endpoint (Phase 8A)
+
+`POST /admin/bootstrap` exists to solve a genuine gap: `/enable` can only
+flip an _existing_ `allowed_chats` row, no in-Telegram command can
+self-allowlist an unknown chat, and `bot_admins` has no Phase 6/7 write
+path at all (see "Command routing and chat state" above and
+`docs/security-and-privacy.md`, "Admin command authorization"). Without
+this endpoint, a fresh deploy would have no way to create its first admin
+or its first allowlisted chat except a direct D1 `INSERT` run by hand
+against the remote database. Phase 8A implements and tests this endpoint
+entirely against local D1; Phase 8B is what actually calls it against the
+remote database, after separate explicit approval (approval unit G,
+docs/operations.md).
+
+**Complete separation from the Telegram webhook flow.** `/admin/bootstrap`
+is routed, authenticated, and processed independently of
+`/telegram/webhook` (`src/index.ts`) — it never touches
+`processed_updates`, the Phase 7 `rate_limit_counters`/
+`openai_daily_usage` tables, or any Telegram/OpenAI boundary. This is
+deliberate: it is a pure authenticated D1 setup operation, not a
+message-processing one, and mixing it into the webhook's dedupe/rate-limit
+machinery would gain nothing while adding an unrelated failure mode to
+both paths.
+
+**Three separated responsibilities**, each its own small module rather
+than one large handler function:
+
+- `src/infrastructure/admin/setup-secret.ts` — Secret verification only.
+  Checks a dedicated `X-Setup-Admin-Secret` header (not `Authorization:
+Bearer`, so this Secret's request shape never depends on or gets
+  confused with a future Authorization-based scheme) against
+  `SETUP_ADMIN_SECRET`, before any body read or D1 access — fail-closed
+  on a missing/empty Secret, exactly like the Telegram webhook Secret
+  check. The constant-time comparison itself lives in
+  `src/shared/secret-compare.ts` (`timingSafeEqualStrings`), extracted
+  out of `src/infrastructure/telegram/webhook-secret.ts` in this phase so
+  both Secret checks share one audited implementation instead of two
+  independently-maintained copies.
+- `src/domain/bootstrap.ts` — `parseBootstrapRequest`, a pure parser
+  (raw `unknown` JSON in, a validated `{ adminUserId, chatId }` or a
+  `ValidationError` out) mirroring
+  `src/infrastructure/telegram/parse-update.ts`'s style: `adminUserId`
+  must be a positive safe integer (a Telegram user ID), `chatId` must be
+  a non-zero safe integer (never constrained to positive, since Telegram
+  group chat IDs are negative). Extra fields on the request body are
+  ignored, not rejected — the same philosophy `validateAppConfig`/
+  `validateReliabilityConfig` already use for their inputs.
+- `src/infrastructure/d1/bootstrap.ts` — `bootstrapAdminAndChat`, the
+  single atomic mutation, via `db.batch()` (the same transactional
+  primitive `forget-me.ts` uses for `/forgetme confirm`'s multi-table
+  delete — per Cloudflare's D1 documentation, a batch is one SQL
+  transaction that rolls back entirely if any statement fails):
+  `INSERT INTO bot_admins ... ON CONFLICT (user_id) DO NOTHING` and
+  `INSERT INTO allowed_chats (chat_id, enabled) VALUES (..., 1) ON
+CONFLICT (chat_id) DO UPDATE SET enabled = 1, ...`. Both statements
+  were verified directly against local D1 (`wrangler d1 execute
+--local`) before being wired into the repository, matching the Phase 7
+  practice for the reliability-counter UPSERTs. Idempotent by
+  construction: repeating the same `(adminUserId, chatId)` request never
+  creates a duplicate `bot_admins` row and never fails — it simply
+  confirms the same end state. A pre-existing **disabled** chat is
+  unconditionally re-enabled, since bootstrapping a chat is itself an
+  explicit statement that it should be active.
+
+`src/handlers/admin-bootstrap.ts` composes these three, in the same
+order as `telegram-webhook.ts`: Secret verification → JSON parse →
+request-shape validation → the one atomic D1 mutation → a single
+structured log line → response. No new migration was needed — the
+mutation writes only to `bot_admins` and `allowed_chats`, both already
+present since Phase 2/6.
+
+**No new schema.** Bootstrap deliberately never touches
+`speaker_profiles`, `speaker_preferences`, `translation_corrections`,
+`processed_updates`, or either Phase 7 reliability-counter table — see
+docs/data-model.md.
+
+**Response minimization.** A successful bootstrap returns a fixed
+`{ status: "ok", result: "bootstrap-complete" }` — never an echo of the
+submitted `adminUserId`/`chatId`. Every error response is one of three
+fixed, generic bodies (401 `UNAUTHORIZED`, 400
+`INVALID_BOOTSTRAP_REQUEST`/`MALFORMED_JSON`, 500 `INTERNAL_ERROR`) —
+never a raw D1 error message. The structured log line for this endpoint
+(`event: "admin_bootstrap"`) never includes `adminUserId` or `chatId` —
+`LogFields`' `chatId` field is for a Telegram chat ID surfaced by the
+webhook path; the bootstrap handler's own `finish()` helper is typed to
+exclude it and `updateId` entirely, so passing either would be a compile
+error, not a runtime discipline problem. See
+docs/security-and-privacy.md, "Bootstrap endpoint threat model".
+
+**Routing.** `src/index.ts` matches `POST /admin/bootstrap` only — any
+other method to that path (or any unmatched path) falls through to the
+existing generic 404, exactly like every other route in this Worker; no
+new 405 behavior was introduced, to keep routing behavior uniform across
+the whole Worker.
 
 ## What this Worker does _not_ do (see `docs/implementation-plan.md`)
 

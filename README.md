@@ -4,35 +4,53 @@ A Telegram bot that translates between Japanese and Brazilian Portuguese
 in a family group chat, aiming to keep tone, emoji, names, and forms of
 address natural in both directions.
 
-## Current status: Phase 7 complete — bot not deployed
+## Current status: Phase 8A deployment preparation complete — bot not deployed
 
 This repository currently contains project conventions, documentation, a
-Worker with `GET /health` and a `POST /telegram/webhook` boundary, CI/test
-tooling, a vendor-independent domain/config/error layer, a pure Telegram
-Update parser, a locally tested D1 migration/repository layer, a
-mockable Telegram `sendMessage` client, a full OpenAI translation
-pipeline (versioned prompt, Structured Outputs client, timeout + capped
-transient-only retry, and the translate-and-reply application use case),
-speaker memory (per-`(chat_id, user_id)` auto-observed style, explicit
-preferences, and short term corrections, resolved explicit-over-observed
-and folded into the OpenAI prompt without a second API call), and the
-full command surface — `/help`, `/status`, `/profile`, `/remember`,
-`/forget`, `/forgetme`, `/correct`, and admin-only `/enable`/`/disable`
+Worker with `GET /health`, `POST /telegram/webhook`, and
+`POST /admin/bootstrap` boundaries, CI/test tooling, a vendor-independent
+domain/config/error layer, a pure Telegram Update parser, a locally
+tested D1 migration/repository layer, a mockable Telegram `sendMessage`
+client, a full OpenAI translation pipeline (versioned prompt, Structured
+Outputs client, timeout + capped transient-only retry, and the
+translate-and-reply application use case), speaker memory
+(per-`(chat_id, user_id)` auto-observed style, explicit preferences, and
+short term corrections, resolved explicit-over-observed and folded into
+the OpenAI prompt without a second API call), and the full command
+surface — `/help`, `/status`, `/profile`, `/remember`, `/forget`,
+`/forgetme`, `/correct`, and admin-only `/enable`/`/disable`
 (`src/commands/`, `src/application/execute-command.ts`), completely
 separate from the translation flow: a command message never reaches
 OpenAI. The webhook verifies Telegram's Secret header, gates messages
 through the allowlist/dedupe tables, applies reliability/security
 hardening (see below), then routes to either the command path or (for
 ordinary text) the speaker-memory-informed translation path — all tested
-against mocked OpenAI/Telegram HTTP responses and local D1 (538 tests);
+against mocked OpenAI/Telegram HTTP responses and local D1 (583 tests);
 no real OpenAI/Telegram API call has been made, and the Phase 5/6/7
 migrations have been applied only locally. No Telegram bot has been
 created, no Secret is registered, the Worker is not deployed, and no
-webhook is registered with Telegram — those four actions, plus the
-remote migrations, belong to Phase 8. See
-[`docs/implementation-plan.md`](docs/implementation-plan.md) for the full
-phased plan — **Phases 0–7 are complete** and Phase 8 (deployment
-preparation) has not started.
+webhook is registered with Telegram — those actions, plus the remote
+migrations and the production admin/chat bootstrap, are Phase 8B, each
+requiring its own separate approval (see
+[`docs/operations.md`](docs/operations.md), "External action approval
+matrix"). See [`docs/implementation-plan.md`](docs/implementation-plan.md)
+for the full phased plan — **Phases 0–7 are complete, Phase 8A
+(deployment preparation) is complete, and Phase 8B (the external actions
+themselves) has not started.**
+
+**Deployment preparation (Phase 8A):** a `POST /admin/bootstrap` endpoint
+(`SETUP_ADMIN_SECRET`-gated, entirely separate from the Telegram webhook
+flow) provides the one sanctioned way to register the first real bot
+admin and allowlist the first real chat — a single atomic, idempotent D1
+upsert into the existing `bot_admins`/`allowed_chats` tables, with no new
+migration. `docs/operations.md` is now the deployment runbook: an
+external-action approval matrix (nine independent approval units), a
+first-deployment ordering, a per-Secret registration runbook, a remote
+migration runbook, a Worker-deployment runbook, a webhook-registration
+runbook (a documented manual operator call — no permanent webhook-setup
+endpoint was built), post-deploy smoke checks, and an emergency-stop
+procedure. Nothing external was actually performed — every command in
+the runbook uses placeholder values only.
 
 **Reliability and security hardening (Phase 7):** concurrent dedupe
 correctness is verified under simultaneous delivery; a per-chat inbound
@@ -115,23 +133,24 @@ telegram-translation-ptbr-ja/
 ├── .github/workflows/ci.yml                               # format/lint/typecheck/test on push & PR
 ├── docs/                                                   # architecture, data model, security, ops, plan, ADRs
 ├── src/
-│   ├── index.ts                                            # Worker: GET /health, POST /telegram/webhook, 404 otherwise
+│   ├── index.ts                                            # Worker: GET /health, POST /telegram/webhook, POST /admin/bootstrap, 404 otherwise
 │   ├── env.d.ts                                             # Secret binding types (merged into the generated Env)
-│   ├── domain/                                             # vendor-independent types (language, speaker, translation, telegram-update, speaker-memory)
+│   ├── domain/                                             # vendor-independent types (language, speaker, translation, telegram-update, speaker-memory, bootstrap)
 │   ├── config/                                             # non-secret config validation
 │   ├── prompts/                                            # versioned OpenAI prompt + Structured Outputs schema
 │   ├── commands/                                           # command vocabulary, pure parser, plain-text response builders
 │   ├── application/                                        # translate-and-reply and execute-command use cases (boundary interfaces only)
-│   ├── handlers/                                           # HTTP/webhook entry points
+│   ├── handlers/                                           # HTTP/webhook entry points (telegram-webhook.ts, admin-bootstrap.ts)
+│   ├── infrastructure/admin/                                # Phase 8A: setup-secret.ts (bootstrap Secret check)
 │   ├── infrastructure/d1/                                  # parameterized D1 repositories and row validation
 │   ├── infrastructure/openai/                              # Responses API client, response validation, domain conversion
 │   ├── infrastructure/telegram/                            # Update parser, webhook Secret check, sendMessage client
-│   └── shared/errors.ts, structured-log.ts, time-windows.ts # error hierarchy, structured logging, UTC time-bucket math
+│   └── shared/errors.ts, structured-log.ts, time-windows.ts, secret-compare.ts # error hierarchy, structured logging, UTC time-bucket math, timing-safe Secret comparison
 ├── test/                                                   # mirrors src/, plus health.test.ts for the scaffold
 ├── migrations/0001_initial.sql                             # local Phase 2 D1 schema (applied remotely)
-├── migrations/0002_speaker_memory.sql                      # local Phase 5 D1 schema (applied locally only — see Phase 8)
-├── migrations/0003_commands.sql                             # local Phase 6 D1 schema (bot_admins; applied locally only — see Phase 8)
-├── migrations/0004_reliability.sql                          # local Phase 7 D1 schema (rate_limit_counters, openai_daily_usage; applied locally only — see Phase 8)
+├── migrations/0002_speaker_memory.sql                      # local Phase 5 D1 schema (applied locally only — see Phase 8B)
+├── migrations/0003_commands.sql                             # local Phase 6 D1 schema (bot_admins; applied locally only — see Phase 8B)
+├── migrations/0004_reliability.sql                          # local Phase 7 D1 schema (rate_limit_counters, openai_daily_usage; applied locally only — see Phase 8B)
 ├── .dev.vars.example                                       # empty-valued template for local Secrets
 ├── CLAUDE.md / AGENTS.md                                   # agent instructions (point to docs/project-rules.md)
 ├── worker-configuration.d.ts                               # generated binding/runtime types
@@ -186,11 +205,14 @@ SETUP_ADMIN_SECRET
 None of these are registered as real Cloudflare Secrets yet.
 `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_BOT_TOKEN`, and `OPENAI_API_KEY` are
 read by the webhook boundary, Telegram client, and OpenAI client when
-present, but the code treats them as optional and fails safely (rejecting
-requests) when they're absent — see
+present, and `SETUP_ADMIN_SECRET` is read by the Phase 8A
+`POST /admin/bootstrap` endpoint
+(`src/infrastructure/admin/setup-secret.ts`) — every one of them is
+optional in code and fails safely (rejecting requests) when absent. See
 [`docs/security-and-privacy.md`](docs/security-and-privacy.md) for how
-they'll eventually be managed, and `.dev.vars.example` for the local-dev
-template.
+they'll eventually be managed, [`docs/operations.md`](docs/operations.md)
+for the full per-Secret registration runbook, and `.dev.vars.example` for
+the local-dev template.
 
 ## Cloudflare D1 binding
 
@@ -201,10 +223,14 @@ migration (`0002_speaker_memory.sql`), the Phase 6 migration
 (`0003_commands.sql`), and the Phase 7 migration
 (`0004_reliability.sql`) have each been applied and verified locally only
 (`wrangler d1 migrations apply --local`) — applying any of them to the
-remote database is a Phase 8 action. The Worker has not been deployed.
-See [`docs/data-model.md`](docs/data-model.md) and
+remote database is a Phase 8B action (see
+[`docs/operations.md`](docs/operations.md), "Remote migration runbook").
+Phase 8A adds no new migration — the `POST /admin/bootstrap` endpoint
+writes only to the existing `bot_admins`/`allowed_chats` tables. The
+Worker has not been deployed. See
+[`docs/data-model.md`](docs/data-model.md) and
 [`docs/implementation-plan.md`](docs/implementation-plan.md) Phases 2,
-5, 6, and 7.
+5, 6, 7, and 8.
 
 ## Testing
 
@@ -244,12 +270,21 @@ concurrency test asserting exactly one successful dedupe reservation
 under simultaneous delivery for the same `update_id`),
 `test/handlers/telegram-webhook-reliability.test.ts` (the per-chat
 inbound rate limit, the per-chat OpenAI attempt burst limit, and the
-global daily OpenAI attempt ceiling, end to end), and
+global daily OpenAI attempt ceiling, end to end),
 `test/handlers/telegram-webhook-security.test.ts` (the Phase 7 security
 regression pass: prompt-injection-shaped and SQL-injection-shaped input,
-sensitive-data-at-rest schema inspection, and log-leak assertions). No
-test calls the real Telegram, OpenAI, or remote D1 — outbound `fetch` is
-always a supplied mock.
+sensitive-data-at-rest schema inspection, and log-leak assertions), and
+the Phase 8A bootstrap-endpoint suite —
+`test/domain/bootstrap.test.ts` (the pure request parser),
+`test/infrastructure/admin/setup-secret.test.ts` (the bootstrap Secret
+check), `test/infrastructure/d1/bootstrap.test.ts` (the atomic
+admin+chat upsert, idempotency, and D1-failure classification against
+local D1), and `test/handlers/admin-bootstrap.test.ts` (end to end:
+authentication ordering, request validation, successful bootstrap,
+idempotency, D1 failure handling, routing isolation from
+`/telegram/webhook`, and structured-log leak assertions). No test calls
+the real Telegram, OpenAI, or remote D1 — outbound `fetch` is always a
+supplied mock.
 
 ## Deployment
 

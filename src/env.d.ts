@@ -16,4 +16,6 @@ interface Env {
   TELEGRAM_WEBHOOK_SECRET?: string;
   TELEGRAM_BOT_TOKEN?: string;
   OPENAI_API_KEY?: string;
+  /** Phase 8A: authenticates `POST /admin/bootstrap` — see src/handlers/admin-bootstrap.ts. */
+  SETUP_ADMIN_SECRET?: string;
 }

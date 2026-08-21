@@ -13,9 +13,16 @@ creates `bot_admins`; `migrations/0004_reliability.sql` (Phase 7) creates
 with `wrangler d1 migrations apply --local` and by the Workers Vitest
 test suite
 (`test/infrastructure/d1/{repositories,speaker-memory-repositories,bot-admins,forget-me,reliability-counters}.test.ts`),
-but **none** is applied to the remote database (that's Phase 8). The
+but **none** is applied to the remote database (that's Phase 8B). The
 remaining tables below stay plans for the later phases that own their
 behavior.
+
+**Phase 8A adds no new migration and no new table.** The production
+bootstrap endpoint (`POST /admin/bootstrap`, see docs/architecture.md,
+"Bootstrap endpoint") writes only to the two existing tables that
+already needed a production-setup write path — `bot_admins` (see below)
+and `allowed_chats` (see above) — via `INSERT ... ON CONFLICT` upserts,
+not new columns or a new table. `migrations/0005_*.sql` does not exist.
 
 **No message content anywhere in this schema, confirmed through Phase
 7:** neither `rate_limit_counters` nor `openai_daily_usage` — nor any
@@ -46,6 +53,14 @@ in. Anything not listed here is ignored.
   secondary index expected)
 - **Phase 2 decision:** disabling is a soft flag (`enabled = 0`) so the
   allowlist entry can be retained and re-enabled explicitly.
+- **Phase 8A:** `POST /admin/bootstrap`
+  (`src/infrastructure/d1/bootstrap.ts`) can insert the _first_ row for a
+  chat that has none yet — the one sanctioned exception to "no command
+  can self-allowlist an unknown chat" (docs/architecture.md, "Command
+  routing and chat state"), since it is authenticated by
+  `SETUP_ADMIN_SECRET`, not by anything reachable from Telegram. For a
+  chat that already has a row, it unconditionally sets `enabled = 1`,
+  including re-enabling a previously-`/disable`d chat.
 
 ## `speaker_profiles`
 
@@ -283,12 +298,20 @@ any specific chat.
 - **Must not store:** which chat granted admin status, a display name,
   or any other identifying detail beyond the bare Telegram user ID —
   this table exists purely as a yes/no authorization check.
-- **Population:** Phase 6 implements only the read path
-  (`isBotAdmin`); there is no write path or command that inserts a row.
-  Test fixtures insert synthetic rows directly, and only ever use an
-  obviously-fake ID. Registering the first real admin row is Phase 8
-  work — see docs/security-and-privacy.md for why this stays separate
-  from `SETUP_ADMIN_SECRET`.
+- **Population:** Phase 6 implemented only the read path (`isBotAdmin`);
+  no in-Telegram command writes this table (self-service admin grants
+  would be a privilege-escalation risk — see "Retention" below). Phase 8A
+  adds the one sanctioned write path: `bootstrapAdminAndChat`
+  (`src/infrastructure/d1/bootstrap.ts`), reachable only through
+  `POST /admin/bootstrap` — a `SETUP_ADMIN_SECRET`-gated endpoint
+  entirely separate from the Telegram command surface (see
+  docs/architecture.md, "Bootstrap endpoint"). Phase 8A implements and
+  tests this write path against local D1 only; actually calling it
+  against the remote database to register the first real admin row is
+  Phase 8B work, requiring its own separate approval (approval unit G,
+  docs/operations.md) — see docs/security-and-privacy.md for why the
+  runtime authorization mechanism itself stays independent of
+  `SETUP_ADMIN_SECRET`.
 - **Retention:** indefinite until an operator removes a row directly
   (no in-bot command manages this table in Phase 6 — deliberately, since
   self-service admin grants would be a privilege-escalation risk).
@@ -445,8 +468,37 @@ code later:
 - **The Phase 7 migration (`0004_reliability.sql`) has not been applied
   to the remote database** — only verified locally
   (`wrangler d1 migrations apply --local`) and by the Workers Vitest
-  suite. Applying it remotely is a Phase 8 action, same as
+  suite. Applying it remotely is a Phase 8B action, same as
   `0002_speaker_memory.sql` and `0003_commands.sql`.
+
+## Phase 8A bootstrap-endpoint design decisions (summary)
+
+Recorded here so they don't have to be re-derived from the code later:
+
+- **No new migration, deliberately.** `bootstrapAdminAndChat` writes only
+  to `bot_admins` and `allowed_chats`, both already present since Phase
+  2/6 — introducing a `0005_*.sql` migration for a feature that needs no
+  new column or table would be schema churn for its own sake.
+- **One atomic `db.batch()` covering both tables**, not two separate
+  writes — an admin registered with no allowlisted chat to administer
+  (or vice versa) would leave a deploy in a half-bootstrapped state; see
+  docs/architecture.md, "Bootstrap endpoint".
+- **Idempotent by construction, not by a pre-check.** The admin insert
+  uses `ON CONFLICT (user_id) DO NOTHING` and the chat insert uses
+  `ON CONFLICT (chat_id) DO UPDATE SET enabled = 1, ...` — repeating the
+  exact same bootstrap request (e.g. an operator retry after an
+  ambiguous network response) is always safe and never surfaces a
+  constraint-violation error, without the handler needing a separate
+  "does this already exist?" read first.
+- **Re-enabling a pre-existing disabled chat is intentional, not an
+  edge-case bug.** Bootstrapping a chat is itself an explicit statement
+  that the chat should be active; if an operator wants a chat to stay
+  disabled, they simply don't bootstrap it (or `/disable` it again
+  afterward through the normal Telegram command path).
+- **This endpoint's write path is local-only as of Phase 8A** — it has
+  never been called against the remote database (or with a real
+  `SETUP_ADMIN_SECRET`, real admin ID, or real chat ID); doing so is a
+  Phase 8B action requiring its own separate approval.
 
 ## Migration policy
 

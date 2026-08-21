@@ -9,28 +9,16 @@
  * see docs/security-and-privacy.md ("Telegram Webhook Secret
  * verification").
  *
- * Uses the Workers-runtime `crypto.subtle.timingSafeEqual` extension
- * (non-standard, workerd-only) for a constant-time comparison. That
- * function requires both buffers to be the same length and throws
- * otherwise, so a length mismatch is handled by comparing a buffer
- * against itself instead of returning immediately — this keeps that
- * branch's cost similar to the equal-length path rather than exiting
- * early, though it does not claim to hide the length difference itself.
+ * The constant-time comparison itself lives in
+ * `src/shared/secret-compare.ts`, shared with the Phase 8
+ * setup/admin-bootstrap Secret check
+ * (`src/infrastructure/admin/setup-secret.ts`) — this module only owns
+ * the Telegram-specific header name and request shape.
  */
 
+import { timingSafeEqualStrings } from "../../shared/secret-compare";
+
 const WEBHOOK_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token";
-
-function timingSafeEqualStrings(a: string, b: string): boolean {
-  const encoder = new TextEncoder();
-  const aBytes = encoder.encode(a);
-  const bBytes = encoder.encode(b);
-
-  if (aBytes.byteLength !== bBytes.byteLength) {
-    crypto.subtle.timingSafeEqual(aBytes, aBytes);
-    return false;
-  }
-  return crypto.subtle.timingSafeEqual(aBytes, bBytes);
-}
 
 /**
  * Returns whether `request` carries the correct webhook Secret. Never
