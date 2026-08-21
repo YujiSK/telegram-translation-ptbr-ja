@@ -8,24 +8,28 @@ D1 for speaker memory. See `README.md` for the full picture.
 
 ## Current phase
 
-**Phase 6 completed; Phase 7 not started.** The local webhook boundary,
+**Phase 7 completed; Phase 8 not started.** The local webhook boundary,
 Secret verification, allowlist/dedupe wiring, OpenAI translation (a single
 Structured Outputs call per message), the Telegram reply, speaker
 memory (per-`(chat_id, user_id)` observed style, explicit preferences,
 and term corrections, resolved explicit-over-observed and folded into
-the OpenAI prompt with no second API call), and the full command surface
+the OpenAI prompt with no second API call), the full command surface
 (`/help`, `/status`, `/profile`, `/remember`, `/forget`, `/forgetme`,
 `/correct`, admin-only `/enable`/`/disable` — completely separate from
-the translation flow, never calling OpenAI) are implemented and tested
-against mocked OpenAI/Telegram responses and local D1 — no real
-OpenAI/Telegram API call has been made, and the Phase 5 and Phase 6
-migrations (`migrations/0002_speaker_memory.sql`,
-`migrations/0003_commands.sql`) have each been applied only locally, not
-to the remote database. Reliability/security hardening (Phase 7) has not
-started. Telegram bot creation, Secret registration, Worker deployment,
-webhook registration, and the remote `0002`/`0003` migrations remain
-Phase 8 actions; do not perform them without an explicit go-ahead. See
-`docs/implementation-plan.md` for the authoritative status.
+the translation flow, never calling OpenAI), and reliability/security
+hardening (concurrent dedupe verification, a per-chat inbound rate
+limit, a per-chat and a global daily OpenAI attempt limit, structured
+field-allowlisted logging, and a security regression pass) are
+implemented and tested against mocked OpenAI/Telegram responses and
+local D1 — no real OpenAI/Telegram API call has been made, and the
+Phase 5, Phase 6, and Phase 7 migrations
+(`migrations/0002_speaker_memory.sql`, `migrations/0003_commands.sql`,
+`migrations/0004_reliability.sql`) have each been applied only locally,
+not to the remote database. Telegram bot creation, Secret registration,
+Worker deployment, webhook registration, and the remote `0002`/`0003`/
+`0004` migrations remain Phase 8 actions; do not perform them without an
+explicit go-ahead. See `docs/implementation-plan.md` for the
+authoritative status.
 
 ## Always read before working
 

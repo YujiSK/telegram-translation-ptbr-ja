@@ -31,6 +31,21 @@ export interface OpenAiApiCallOptions {
   readonly maxAttempts?: number;
   /** Injectable retry-delay wait function so tests never actually sleep. Defaults to a real delay. */
   readonly waitFn?: (ms: number) => Promise<void>;
+  /**
+   * Phase 7: called immediately before *every* HTTP attempt, including
+   * retries — never once per logical translation. Lets a caller (the
+   * webhook, which captures `chatId` in a closure — see
+   * docs/architecture.md, "Rate limiting and usage ceiling placement")
+   * reserve one unit of a rate/usage budget per attempt without this
+   * module importing D1 itself (docs/project-rules.md rule 1-2: no
+   * infrastructure/d1 dependency inside infrastructure/openai). If it
+   * throws (typically a `RateLimitExceededError`/`UsageLimitExceededError`
+   * — see `src/shared/errors.ts`), that attempt is never made and the
+   * error propagates immediately — it is not caught or retried by the
+   * loop below, since budget exhaustion is a safe control-flow signal,
+   * not a transient upstream failure.
+   */
+  readonly beforeAttempt?: () => Promise<void>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -121,6 +136,11 @@ export async function callOpenAiResponses(
   const waitFn = options.waitFn ?? defaultWait;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (options.beforeAttempt) {
+      // Deliberately outside the try/catch below: a budget rejection is
+      // never treated as a transient upstream failure and never retried.
+      await options.beforeAttempt();
+    }
     try {
       return await performResponsesRequest(body, options);
     } catch (error) {

@@ -11,7 +11,9 @@ export type ErrorCode =
   | "VALIDATION_ERROR"
   | "CONFIGURATION_ERROR"
   | "UPSTREAM_TRANSIENT_ERROR"
-  | "UPSTREAM_PERMANENT_ERROR";
+  | "UPSTREAM_PERMANENT_ERROR"
+  | "RATE_LIMIT_EXCEEDED"
+  | "USAGE_LIMIT_EXCEEDED";
 
 export type UpstreamService = "telegram" | "openai" | "d1";
 
@@ -88,6 +90,44 @@ export class PermanentUpstreamError extends UpstreamServiceError {
   constructor(publicMessage: string, service: UpstreamService) {
     super(publicMessage, service);
     this.name = "PermanentUpstreamError";
+  }
+}
+
+/**
+ * Phase 7: a safe, expected control-flow signal — the caller (a chat, for
+ * inbound updates or OpenAI attempts) has made too many requests within
+ * the current rate window. Never an upstream failure and never retried;
+ * the webhook responds 200 with a distinct `ignored:rate-limited`
+ * outcome and — since `retryable` is false and this is not a
+ * `TransientUpstreamError` — keeps the dedupe reservation, so a Telegram
+ * redelivery doesn't repeat the same doomed attempt. See
+ * docs/architecture.md, "Rate limiting and usage ceiling placement".
+ */
+export class RateLimitExceededError extends AppError {
+  readonly code = "RATE_LIMIT_EXCEEDED" as const;
+  readonly retryable = false as const;
+
+  constructor(publicMessage: string) {
+    super(publicMessage);
+    this.name = "RateLimitExceededError";
+  }
+}
+
+/**
+ * Phase 7: a safe, expected control-flow signal — a usage/cost ceiling
+ * (the global daily OpenAI attempt budget) has been reached. Distinct
+ * from `RateLimitExceededError` so logs and callers can tell "too fast
+ * right now" apart from "too much today, come back tomorrow" — the
+ * webhook responds 200 with a distinct `ignored:usage-limit` outcome and
+ * keeps the dedupe reservation, same reasoning as the rate-limit case.
+ */
+export class UsageLimitExceededError extends AppError {
+  readonly code = "USAGE_LIMIT_EXCEEDED" as const;
+  readonly retryable = false as const;
+
+  constructor(publicMessage: string) {
+    super(publicMessage);
+    this.name = "UsageLimitExceededError";
   }
 }
 

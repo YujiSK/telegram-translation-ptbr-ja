@@ -1,4 +1,5 @@
 import { validateAppConfig } from "../config/app-config";
+import { validateReliabilityConfig } from "../config/reliability-config";
 import { parseCommandMessage } from "../commands/parse-command";
 import { executeCommand } from "../application/execute-command";
 import { translateAndReply } from "../application/translate-and-reply";
@@ -10,6 +11,11 @@ import { getAllowedChatState, setAllowedChatEnabled } from "../infrastructure/d1
 import { isBotAdmin } from "../infrastructure/d1/bot-admins";
 import { forgetSpeakerData } from "../infrastructure/d1/forget-me";
 import { recordUpdateIfNew, releaseProcessedUpdate } from "../infrastructure/d1/processed-updates";
+import {
+  consumeChatHandledUpdateLimit,
+  consumeChatOpenAiAttemptLimit,
+  consumeDailyOpenAiAttemptLimit,
+} from "../infrastructure/d1/reliability-counters";
 import {
   deleteSpeakerPreference,
   getSpeakerPreferences,
@@ -29,7 +35,13 @@ import { sendMessage } from "../infrastructure/telegram/send-message";
 import { translateMessage } from "../infrastructure/openai/translate";
 import { parseTelegramUpdate } from "../infrastructure/telegram/parse-update";
 import { isWebhookSecretValid } from "../infrastructure/telegram/webhook-secret";
-import { TransientUpstreamError } from "../shared/errors";
+import {
+  RateLimitExceededError,
+  TransientUpstreamError,
+  UsageLimitExceededError,
+} from "../shared/errors";
+import { classifyError, logStructuredEvent, type LogFields } from "../shared/structured-log";
+import { minuteWindowId, utcDayId } from "../shared/time-windows";
 
 /**
  * POST /telegram/webhook entry point.
@@ -39,9 +51,10 @@ import { TransientUpstreamError } from "../shared/errors";
  * read, JSON parse, or D1 access; unsupported updates and the bot's own
  * messages are dropped before any D1 access at all; the allowed-chat
  * state lookup (a D1 read) happens before the dedupe record (a D1
- * write); the dedupe record happens before any command execution or
+ * write); the dedupe record happens before the per-chat inbound
+ * handled-update rate limit (Phase 7) and any command execution or
  * translation work, so a redelivered duplicate never re-triggers any of
- * it.
+ * it, and never double-consumes the rate budget either.
  *
  * Phase 6 (commands): command detection is a pure, in-memory parse
  * (`parseCommandMessage`) that runs before the allowed-chat state lookup,
@@ -52,6 +65,14 @@ import { TransientUpstreamError } from "../shared/errors";
  * message never reaches the OpenAI/speaker-memory translation flow below
  * — it is handled entirely by `src/application/execute-command.ts`,
  * which never calls OpenAI and never writes the observed-style columns.
+ *
+ * Phase 7: a per-chat inbound handled-update limit applies to both the
+ * command and translation paths; a per-chat OpenAI attempt burst limit
+ * and a global daily OpenAI attempt ceiling apply only within the
+ * translation path's OpenAI call. See docs/architecture.md, "Rate
+ * limiting and usage ceiling placement". Every final outcome is
+ * structured-logged (`src/shared/structured-log.ts`) — never message
+ * text, prompts, raw responses, or Secrets.
  *
  * Speaker memory (Phase 5, translation path only): read before the
  * OpenAI call, written best-effort after a successful Telegram reply —
@@ -68,6 +89,8 @@ type WebhookOutcome =
   | "ignored:duplicate"
   | "ignored:too-long"
   | "ignored:untargeted-language"
+  | "ignored:rate-limited"
+  | "ignored:usage-limit"
   | "command:handled"
   | "command:unknown"
   | "command:invalid"
@@ -96,6 +119,16 @@ function accepted(outcome: WebhookOutcome): Response {
   return jsonResponse({ status: "ok", outcome }, 200);
 }
 
+/** Logs the request's single final outcome, then returns the response unchanged — see the module doc comment for why this is the only place `logStructuredEvent` is called. */
+function finish(
+  response: Response,
+  startedAt: number,
+  fields: Omit<LogFields, "status" | "durationMs">,
+): Response {
+  logStructuredEvent({ ...fields, status: response.status, durationMs: Date.now() - startedAt });
+  return response;
+}
+
 /** Best-effort: release failure must not change the response — the request already failed and needs a 5xx either way. */
 async function releaseDedupeReservation(db: D1Database, updateId: number): Promise<void> {
   try {
@@ -121,9 +154,14 @@ function commandOutcomeToWebhookOutcome(
 }
 
 export async function handleTelegramWebhook(request: Request, env: Env): Promise<Response> {
+  const startedAt = Date.now();
+
   // 1. Secret verification — before any body read, JSON parse, or D1 access.
   if (!isWebhookSecretValid(request, env.TELEGRAM_WEBHOOK_SECRET)) {
-    return unauthorized();
+    return finish(unauthorized(), startedAt, {
+      event: "telegram_webhook",
+      outcome: "unauthorized",
+    });
   }
 
   // 2. Safe JSON parse.
@@ -131,25 +169,40 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   try {
     rawBody = await request.json();
   } catch {
-    return badRequest("MALFORMED_JSON");
+    return finish(badRequest("MALFORMED_JSON"), startedAt, {
+      event: "telegram_webhook",
+      outcome: "malformed_json",
+    });
   }
 
   // 3. Convert to the internal type via the existing Phase 1 parser.
   const parsed = parseTelegramUpdate(rawBody);
   if (!parsed.ok) {
-    return badRequest("INVALID_UPDATE");
+    return finish(badRequest("INVALID_UPDATE"), startedAt, {
+      event: "telegram_webhook",
+      outcome: "invalid_update",
+    });
   }
 
   const update = parsed.value;
 
   // 4. A normal but out-of-scope update (photo, sticker, channel post, ...).
   if (update.kind === "unsupported") {
-    return accepted("ignored:unsupported");
+    return finish(accepted("ignored:unsupported"), startedAt, {
+      event: "telegram_webhook",
+      outcome: "ignored:unsupported",
+      updateId: update.updateId,
+    });
   }
 
   // 5. The bot's own messages are never processed — prevents a reply-to-itself loop.
   if (update.speaker.isBot) {
-    return accepted("ignored:self");
+    return finish(accepted("ignored:self"), startedAt, {
+      event: "telegram_webhook",
+      outcome: "ignored:self",
+      updateId: update.updateId,
+      chatId: update.chatId,
+    });
   }
 
   // 6. Command detection — pure, in-memory, no I/O. Needed before the
@@ -162,39 +215,122 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   try {
     // 7. Allowed-chat state lookup (D1 read) before any dedupe write.
     chatState = await getAllowedChatState(env.DB, update.chatId);
-  } catch {
+  } catch (error) {
     // D1 failure: never report success, never leak the underlying error.
-    return internalError();
+    return finish(internalError(), startedAt, {
+      event: "telegram_webhook",
+      outcome: "internal_error",
+      updateId: update.updateId,
+      chatId: update.chatId,
+      ...classifyError(error),
+    });
   }
 
-  if (chatState === "missing") {
-    return accepted("ignored:not-allowlisted");
-  }
-  if (chatState === "disabled" && !isEnableCommand) {
-    return accepted("ignored:not-allowlisted");
+  if (chatState === "missing" || (chatState === "disabled" && !isEnableCommand)) {
+    return finish(accepted("ignored:not-allowlisted"), startedAt, {
+      event: "telegram_webhook",
+      outcome: "ignored:not-allowlisted",
+      updateId: update.updateId,
+      chatId: update.chatId,
+    });
   }
 
   let isNewUpdate: boolean;
   try {
     // 8. Atomic dedupe record — false means this update_id was already seen.
     isNewUpdate = await recordUpdateIfNew(env.DB, update.updateId);
-  } catch {
-    return internalError();
+  } catch (error) {
+    return finish(internalError(), startedAt, {
+      event: "telegram_webhook",
+      outcome: "internal_error",
+      updateId: update.updateId,
+      chatId: update.chatId,
+      ...classifyError(error),
+    });
   }
 
   if (!isNewUpdate) {
-    return accepted("ignored:duplicate");
+    return finish(accepted("ignored:duplicate"), startedAt, {
+      event: "telegram_webhook",
+      outcome: "ignored:duplicate",
+      updateId: update.updateId,
+      chatId: update.chatId,
+    });
   }
 
-  // 9. Command path: never reaches OpenAI config validation, the
-  //    translatable-message length check, speaker-memory reads, or the
-  //    OpenAI call below — see the module-level comment.
+  // 9. Rate/usage config, validated once here (after dedupe, same
+  //    reasoning as the translation-only config below: a misconfiguration
+  //    won't be fixed by a retry, so the dedupe row is left in place).
+  //    Applies to both the command and translation paths for the inbound
+  //    limit; only the translation path additionally uses the OpenAI
+  //    attempt limits, further below.
+  const reliabilityConfigResult = validateReliabilityConfig({
+    MAX_HANDLED_UPDATES_PER_CHAT_PER_MINUTE: env.MAX_HANDLED_UPDATES_PER_CHAT_PER_MINUTE,
+    MAX_OPENAI_ATTEMPTS_PER_CHAT_PER_MINUTE: env.MAX_OPENAI_ATTEMPTS_PER_CHAT_PER_MINUTE,
+    MAX_OPENAI_ATTEMPTS_PER_DAY: env.MAX_OPENAI_ATTEMPTS_PER_DAY,
+  });
+  if (!reliabilityConfigResult.ok) {
+    return finish(internalError(), startedAt, {
+      event: "telegram_webhook",
+      outcome: "internal_error",
+      updateId: update.updateId,
+      chatId: update.chatId,
+      ...classifyError(reliabilityConfigResult.error),
+    });
+  }
+  const reliabilityConfig = reliabilityConfigResult.value;
+
+  // 9b. Per-chat inbound handled-update rate limit — after the dedupe
+  //     reservation (so a redelivery of the same update never
+  //     double-consumes the budget), before any command/translation work.
+  let handledUpdateAllowed: boolean;
+  try {
+    handledUpdateAllowed = await consumeChatHandledUpdateLimit(
+      env.DB,
+      update.chatId,
+      minuteWindowId(Date.now()),
+      reliabilityConfig.maxHandledUpdatesPerChatPerMinute,
+    );
+  } catch (error) {
+    if (error instanceof TransientUpstreamError) {
+      await releaseDedupeReservation(env.DB, update.updateId);
+    }
+    return finish(internalError(), startedAt, {
+      event: "telegram_webhook",
+      outcome: "internal_error",
+      updateId: update.updateId,
+      chatId: update.chatId,
+      ...classifyError(error),
+    });
+  }
+  if (!handledUpdateAllowed) {
+    // Dedupe reservation is deliberately KEPT (not released): the
+    // reservation already exists, and releasing it would let a Telegram
+    // redelivery re-consume/re-check the same budget for what is, from
+    // the bot's perspective, the same inbound event.
+    return finish(accepted("ignored:rate-limited"), startedAt, {
+      event: "telegram_webhook",
+      outcome: "ignored:rate-limited",
+      updateId: update.updateId,
+      chatId: update.chatId,
+      limitType: "chat-updates",
+    });
+  }
+
+  // 10. Command path: never reaches OpenAI config validation, the
+  //     translatable-message length check, speaker-memory reads, or the
+  //     OpenAI call below — see the module-level comment.
   if (commandParse.kind !== "not-a-command") {
     const telegramBotToken = env.TELEGRAM_BOT_TOKEN;
     if (telegramBotToken === undefined || telegramBotToken === "") {
       // Command replies still need Telegram — fail safe, don't release:
       // this won't succeed on a bare redelivery either.
-      return internalError();
+      return finish(internalError(), startedAt, {
+        event: "telegram_webhook",
+        outcome: "internal_error",
+        updateId: update.updateId,
+        chatId: update.chatId,
+      });
     }
 
     try {
@@ -260,18 +396,30 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
           },
         },
       );
-      return accepted(commandOutcomeToWebhookOutcome(result.kind));
+      const outcome = commandOutcomeToWebhookOutcome(result.kind);
+      return finish(accepted(outcome), startedAt, {
+        event: "telegram_webhook",
+        outcome,
+        updateId: update.updateId,
+        chatId: update.chatId,
+      });
     } catch (error) {
       if (error instanceof TransientUpstreamError) {
         await releaseDedupeReservation(env.DB, update.updateId);
       }
       // Permanent failures leave the dedupe row in place on purpose — see
       // the translation-path catch block below for the same reasoning.
-      return internalError();
+      return finish(internalError(), startedAt, {
+        event: "telegram_webhook",
+        outcome: "internal_error",
+        updateId: update.updateId,
+        chatId: update.chatId,
+        ...classifyError(error),
+      });
     }
   }
 
-  // 10. Non-secret configuration must be valid before any OpenAI call.
+  // 11. Non-secret configuration must be valid before any OpenAI call.
   const configResult = validateAppConfig({
     ENVIRONMENT: env.ENVIRONMENT,
     OPENAI_MODEL: env.OPENAI_MODEL,
@@ -280,14 +428,25 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   if (!configResult.ok) {
     // Persistent misconfiguration — releasing would not help a retry, so
     // the dedupe row is left in place (see the release policy above).
-    return internalError();
+    return finish(internalError(), startedAt, {
+      event: "telegram_webhook",
+      outcome: "internal_error",
+      updateId: update.updateId,
+      chatId: update.chatId,
+      ...classifyError(configResult.error),
+    });
   }
   const config = configResult.value;
 
-  // 11. A message longer than the configured ceiling is a normal, safe skip —
+  // 12. A message longer than the configured ceiling is a normal, safe skip —
   //     never sent to OpenAI, never replied to.
   if (update.text.length > config.maxTranslatableMessageLength) {
-    return accepted("ignored:too-long");
+    return finish(accepted("ignored:too-long"), startedAt, {
+      event: "telegram_webhook",
+      outcome: "ignored:too-long",
+      updateId: update.updateId,
+      chatId: update.chatId,
+    });
   }
 
   const openaiApiKey = env.OPENAI_API_KEY;
@@ -300,13 +459,46 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   ) {
     // Secrets aren't registered yet (expected before Phase 8) — fail safe,
     // and don't release: this won't succeed on a bare redelivery either.
-    return internalError();
+    return finish(internalError(), startedAt, {
+      event: "telegram_webhook",
+      outcome: "internal_error",
+      updateId: update.updateId,
+      chatId: update.chatId,
+    });
   }
 
+  // Phase 7: reserves one unit of OpenAI attempt budget immediately
+  // before *each* HTTP attempt (including retries) — chat-minute burst
+  // first, then the global daily ceiling, never the other way around
+  // (docs/architecture.md, "Rate limiting and usage ceiling placement").
+  // Captured as a closure so infrastructure/openai never imports D1.
+  const reserveOpenAiAttempt = async (): Promise<void> => {
+    const nowMs = Date.now();
+    const chatAllowed = await consumeChatOpenAiAttemptLimit(
+      env.DB,
+      update.chatId,
+      minuteWindowId(nowMs),
+      reliabilityConfig.maxOpenAiAttemptsPerChatPerMinute,
+    );
+    if (!chatAllowed) {
+      throw new RateLimitExceededError("OpenAI per-chat attempt burst limit exceeded");
+    }
+    const dailyAllowed = await consumeDailyOpenAiAttemptLimit(
+      env.DB,
+      utcDayId(nowMs),
+      reliabilityConfig.maxOpenAiAttemptsPerDay,
+    );
+    if (!dailyAllowed) {
+      throw new UsageLimitExceededError("Global daily OpenAI attempt ceiling exceeded");
+    }
+  };
+
   try {
-    // 12-15. The application use case: read speaker memory, at most one
-    //        logical OpenAI call, then (only on a translated outcome) one
-    //        Telegram reply and a best-effort observed-profile write.
+    // 13-16. The application use case: read speaker memory, at most one
+    //        logical OpenAI call (each HTTP attempt budget-gated by
+    //        reserveOpenAiAttempt above), then (only on a translated
+    //        outcome) one Telegram reply and a best-effort
+    //        observed-profile write.
     const outcome = await translateAndReply(update, {
       memoryReader: {
         readMemory: async ({ chatId, userId, sourceText }) => {
@@ -329,7 +521,11 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
       },
       translate: {
         translate: (translationRequest) =>
-          translateMessage(translationRequest, { apiKey: openaiApiKey, model: config.openaiModel }),
+          translateMessage(translationRequest, {
+            apiKey: openaiApiKey,
+            model: config.openaiModel,
+            beforeAttempt: reserveOpenAiAttempt,
+          }),
       },
       reply: {
         sendMessage: (params) => sendMessage(params, { botToken: telegramBotToken }),
@@ -347,17 +543,47 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
       },
     });
 
-    if (outcome.kind === "skipped") {
-      return accepted("ignored:untargeted-language");
-    }
-    return accepted("translated");
+    const webhookOutcome: WebhookOutcome =
+      outcome.kind === "skipped" ? "ignored:untargeted-language" : "translated";
+    return finish(accepted(webhookOutcome), startedAt, {
+      event: "telegram_webhook",
+      outcome: webhookOutcome,
+      updateId: update.updateId,
+      chatId: update.chatId,
+    });
   } catch (error) {
+    if (error instanceof RateLimitExceededError) {
+      // Dedupe reservation KEPT — same reasoning as the inbound limit above.
+      return finish(accepted("ignored:rate-limited"), startedAt, {
+        event: "telegram_webhook",
+        outcome: "ignored:rate-limited",
+        updateId: update.updateId,
+        chatId: update.chatId,
+        limitType: "chat-openai",
+      });
+    }
+    if (error instanceof UsageLimitExceededError) {
+      // Dedupe reservation KEPT — same reasoning as the inbound limit above.
+      return finish(accepted("ignored:usage-limit"), startedAt, {
+        event: "telegram_webhook",
+        outcome: "ignored:usage-limit",
+        updateId: update.updateId,
+        chatId: update.chatId,
+        limitType: "openai-daily",
+      });
+    }
     if (error instanceof TransientUpstreamError) {
       await releaseDedupeReservation(env.DB, update.updateId);
     }
     // Permanent failures leave the dedupe row in place on purpose: a
     // Telegram redelivery will then be classified as ignored:duplicate
     // instead of repeating the same doomed OpenAI/Telegram call forever.
-    return internalError();
+    return finish(internalError(), startedAt, {
+      event: "telegram_webhook",
+      outcome: "internal_error",
+      updateId: update.updateId,
+      chatId: update.chatId,
+      ...classifyError(error),
+    });
   }
 }

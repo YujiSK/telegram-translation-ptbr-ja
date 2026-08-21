@@ -32,29 +32,32 @@ beforeEach(async () => {
   ]);
 });
 
-describe("D1 migrations 0001, 0002, and 0003 applied in order", () => {
-  it("creates every Phase 2, Phase 5, and Phase 6 table plus the migration ledger", async () => {
+describe("D1 migrations 0001–0004 applied in order", () => {
+  it("creates every Phase 2, Phase 5, Phase 6, and Phase 7 table plus the migration ledger", async () => {
     const rows = await env.DB.prepare(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('allowed_chats', 'processed_updates', 'speaker_profiles', 'speaker_preferences', 'translation_corrections', 'bot_admins', 'd1_migrations') ORDER BY name",
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('allowed_chats', 'processed_updates', 'speaker_profiles', 'speaker_preferences', 'translation_corrections', 'bot_admins', 'rate_limit_counters', 'openai_daily_usage', 'd1_migrations') ORDER BY name",
     ).all();
 
     expect(rows.results.map((row) => row.name)).toEqual([
       "allowed_chats",
       "bot_admins",
       "d1_migrations",
+      "openai_daily_usage",
       "processed_updates",
+      "rate_limit_counters",
       "speaker_preferences",
       "speaker_profiles",
       "translation_corrections",
     ]);
   });
 
-  it("recorded all three migrations in the ledger", async () => {
+  it("recorded all four migrations in the ledger", async () => {
     const rows = await env.DB.prepare("SELECT name FROM d1_migrations ORDER BY name").all();
     expect(rows.results.map((row) => row.name)).toEqual([
       "0001_initial.sql",
       "0002_speaker_memory.sql",
       "0003_commands.sql",
+      "0004_reliability.sql",
     ]);
   });
 
@@ -170,6 +173,38 @@ describe("processed updates repository", () => {
     await expect(
       env.DB.prepare("INSERT INTO processed_updates (update_id) VALUES (?1)").bind(910000003).run(),
     ).rejects.toThrow();
+  });
+
+  // Phase 7: explicit concurrency verification for the same primitive the
+  // webhook relies on to guarantee "exactly once" processing under a
+  // near-simultaneous Telegram redelivery — see docs/architecture.md,
+  // "Concurrent dedupe verification".
+  it("under concurrent delivery, exactly one of several simultaneous reservations for the same update_id succeeds", async () => {
+    const updateId = 910000009;
+    const attempts = 8;
+
+    const results = await Promise.all(
+      Array.from({ length: attempts }, () => recordUpdateIfNew(env.DB, updateId)),
+    );
+
+    const successCount = results.filter((succeeded) => succeeded).length;
+    expect(successCount).toBe(1);
+    expect(results.filter((succeeded) => !succeeded)).toHaveLength(attempts - 1);
+
+    const rowCount = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM processed_updates WHERE update_id = ?1",
+    )
+      .bind(updateId)
+      .first<number>("count");
+    expect(rowCount).toBe(1);
+  });
+
+  it("under concurrent delivery for distinct update_ids, every reservation succeeds independently", async () => {
+    const updateIds = [910000010, 910000011, 910000012, 910000013];
+
+    const results = await Promise.all(updateIds.map((id) => recordUpdateIfNew(env.DB, id)));
+
+    expect(results).toEqual([true, true, true, true]);
   });
 });
 

@@ -4,7 +4,7 @@ A Telegram bot that translates between Japanese and Brazilian Portuguese
 in a family group chat, aiming to keep tone, emoji, names, and forms of
 address natural in both directions.
 
-## Current status: Phase 6 complete — bot not deployed
+## Current status: Phase 7 complete — bot not deployed
 
 This repository currently contains project conventions, documentation, a
 Worker with `GET /health` and a `POST /telegram/webhook` boundary, CI/test
@@ -21,17 +21,38 @@ full command surface — `/help`, `/status`, `/profile`, `/remember`,
 (`src/commands/`, `src/application/execute-command.ts`), completely
 separate from the translation flow: a command message never reaches
 OpenAI. The webhook verifies Telegram's Secret header, gates messages
-through the allowlist/dedupe tables, then routes to either the command
-path or (for ordinary text) the speaker-memory-informed translation
-path — all tested against mocked OpenAI/Telegram HTTP responses and
-local D1 (439 tests); no real OpenAI/Telegram API call has been made,
-and the Phase 5/6 migrations have been applied only locally. No Telegram
-bot has been created, no Secret is registered, the Worker is not
-deployed, and no webhook is registered with Telegram — those four
-actions, plus the remote migrations, belong to Phase 8. See
+through the allowlist/dedupe tables, applies reliability/security
+hardening (see below), then routes to either the command path or (for
+ordinary text) the speaker-memory-informed translation path — all tested
+against mocked OpenAI/Telegram HTTP responses and local D1 (538 tests);
+no real OpenAI/Telegram API call has been made, and the Phase 5/6/7
+migrations have been applied only locally. No Telegram bot has been
+created, no Secret is registered, the Worker is not deployed, and no
+webhook is registered with Telegram — those four actions, plus the
+remote migrations, belong to Phase 8. See
 [`docs/implementation-plan.md`](docs/implementation-plan.md) for the full
-phased plan — **Phases 0–6 are complete** and Phase 7 (reliability and
-security hardening) has not started.
+phased plan — **Phases 0–7 are complete** and Phase 8 (deployment
+preparation) has not started.
+
+**Reliability and security hardening (Phase 7):** concurrent dedupe
+correctness is verified under simultaneous delivery; a per-chat inbound
+handled-update rate limit (`MAX_HANDLED_UPDATES_PER_CHAT_PER_MINUTE`,
+default 60/minute), a per-chat OpenAI attempt burst limit
+(`MAX_OPENAI_ATTEMPTS_PER_CHAT_PER_MINUTE`, default 20/minute), and a
+global daily OpenAI attempt ceiling (`MAX_OPENAI_ATTEMPTS_PER_DAY`,
+default 300/UTC day) are enforced using only the existing D1 binding — no
+new Cloudflare Rate Limiting binding or other remote service. All three
+values are non-secret `wrangler.jsonc` vars, safe to tune after the
+Phase 9 pilot without a code change. Exceeding a limit responds 200 and
+keeps the update's dedupe reservation, so a Telegram redelivery is never
+double-charged. Structured, field-allowlisted logging replaced ad hoc
+logging; message text, translated text, command text, correction terms,
+display names, prompts, raw OpenAI/Telegram responses, Secrets, and raw
+error messages are never logged. A dedicated security regression suite
+covers the project's threat table (prompt injection, SQL injection,
+sensitive-data-at-rest, log-based leaks, unauthorized access). See
+[`docs/security-and-privacy.md`](docs/security-and-privacy.md) and
+[`docs/architecture.md`](docs/architecture.md) for details.
 
 ## Architecture (planned)
 
@@ -105,11 +126,12 @@ telegram-translation-ptbr-ja/
 │   ├── infrastructure/d1/                                  # parameterized D1 repositories and row validation
 │   ├── infrastructure/openai/                              # Responses API client, response validation, domain conversion
 │   ├── infrastructure/telegram/                            # Update parser, webhook Secret check, sendMessage client
-│   └── shared/errors.ts                                    # error hierarchy (validation/config/upstream)
+│   └── shared/errors.ts, structured-log.ts, time-windows.ts # error hierarchy, structured logging, UTC time-bucket math
 ├── test/                                                   # mirrors src/, plus health.test.ts for the scaffold
 ├── migrations/0001_initial.sql                             # local Phase 2 D1 schema (applied remotely)
 ├── migrations/0002_speaker_memory.sql                      # local Phase 5 D1 schema (applied locally only — see Phase 8)
 ├── migrations/0003_commands.sql                             # local Phase 6 D1 schema (bot_admins; applied locally only — see Phase 8)
+├── migrations/0004_reliability.sql                          # local Phase 7 D1 schema (rate_limit_counters, openai_daily_usage; applied locally only — see Phase 8)
 ├── .dev.vars.example                                       # empty-valued template for local Secrets
 ├── CLAUDE.md / AGENTS.md                                   # agent instructions (point to docs/project-rules.md)
 ├── worker-configuration.d.ts                               # generated binding/runtime types
@@ -175,13 +197,14 @@ template.
 Binding name: **`DB`**. The real database name and ID are configured, while
 local development continues to use local D1 by default. The initial
 migration (`0001_initial.sql`) has been applied remotely; the Phase 5
-migration (`0002_speaker_memory.sql`) and the Phase 6 migration
-(`0003_commands.sql`) have each been applied and verified locally only
-(`wrangler d1 migrations apply --local`) — applying either to the remote
-database is a Phase 8 action. The Worker has not been deployed. See
-[`docs/data-model.md`](docs/data-model.md) and
+migration (`0002_speaker_memory.sql`), the Phase 6 migration
+(`0003_commands.sql`), and the Phase 7 migration
+(`0004_reliability.sql`) have each been applied and verified locally only
+(`wrangler d1 migrations apply --local`) — applying any of them to the
+remote database is a Phase 8 action. The Worker has not been deployed.
+See [`docs/data-model.md`](docs/data-model.md) and
 [`docs/implementation-plan.md`](docs/implementation-plan.md) Phases 2,
-5, and 6.
+5, 6, and 7.
 
 ## Testing
 
@@ -213,12 +236,20 @@ response rejection), `test/prompts/{translation-v1,translation-v2}.test.ts`
 via mocked boundaries), `test/commands/parse-command.test.ts` (the pure
 command parser, including malformed-syntax and `@BotName`-suffix cases),
 `test/domain/speaker-memory.test.ts` (the explicit-over-observed
-priority resolver and correction selection, in isolation), and
-`test/infrastructure/d1/{repositories,speaker-memory-repositories,bot-admins,forget-me}.test.ts`
-(the Phase 2, Phase 5, and Phase 6 D1 repositories, including all three
-migrations applied in order against local D1). No test calls the real
-Telegram, OpenAI, or remote D1 — outbound `fetch` is always a supplied
-mock.
+priority resolver and correction selection, in isolation),
+`test/infrastructure/d1/{repositories,speaker-memory-repositories,bot-admins,forget-me,reliability-counters}.test.ts`
+(the Phase 2, Phase 5, Phase 6, and Phase 7 D1 repositories, including
+all four migrations applied in order against local D1, and a
+concurrency test asserting exactly one successful dedupe reservation
+under simultaneous delivery for the same `update_id`),
+`test/handlers/telegram-webhook-reliability.test.ts` (the per-chat
+inbound rate limit, the per-chat OpenAI attempt burst limit, and the
+global daily OpenAI attempt ceiling, end to end), and
+`test/handlers/telegram-webhook-security.test.ts` (the Phase 7 security
+regression pass: prompt-injection-shaped and SQL-injection-shaped input,
+sensitive-data-at-rest schema inspection, and log-leak assertions). No
+test calls the real Telegram, OpenAI, or remote D1 — outbound `fetch` is
+always a supplied mock.
 
 ## Deployment
 

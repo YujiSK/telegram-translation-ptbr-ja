@@ -4,7 +4,12 @@ import {
   DEFAULT_OPENAI_MAX_ATTEMPTS,
   callOpenAiResponses,
 } from "../../../src/infrastructure/openai/client";
-import { PermanentUpstreamError, TransientUpstreamError } from "../../../src/shared/errors";
+import {
+  PermanentUpstreamError,
+  RateLimitExceededError,
+  TransientUpstreamError,
+  UsageLimitExceededError,
+} from "../../../src/shared/errors";
 
 /**
  * Every test in this file supplies its own `fetchFn` and `waitFn`, so
@@ -218,6 +223,101 @@ describe("callOpenAiResponses — permanent failures are never retried", () => {
       callOpenAiResponses({ model: "gpt-4o-mini" }, { apiKey: API_KEY, fetchFn, waitFn: noopWait }),
     ).rejects.toBeInstanceOf(PermanentUpstreamError);
     expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("callOpenAiResponses — beforeAttempt budget guard (Phase 7)", () => {
+  it("calls beforeAttempt once before a single successful attempt", async () => {
+    const fetchFn = fetchMock().mockResolvedValue(jsonResponse({ output: [] }));
+    const beforeAttempt = vi.fn(() => Promise.resolve());
+
+    await callOpenAiResponses(
+      { model: "gpt-4o-mini" },
+      { apiKey: API_KEY, fetchFn, waitFn: noopWait, beforeAttempt },
+    );
+
+    expect(beforeAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls beforeAttempt again before each retried attempt, not just once per logical call", async () => {
+    const fetchFn = fetchMock()
+      .mockResolvedValueOnce(jsonResponse({ error: { message: "server error" } }, 503))
+      .mockResolvedValueOnce(jsonResponse({ output: [] }));
+    const beforeAttempt = vi.fn(() => Promise.resolve());
+
+    await callOpenAiResponses(
+      { model: "gpt-4o-mini" },
+      { apiKey: API_KEY, fetchFn, waitFn: noopWait, beforeAttempt },
+    );
+
+    expect(beforeAttempt).toHaveBeenCalledTimes(2);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("never fetches when beforeAttempt rejects with RateLimitExceededError, and propagates it unchanged", async () => {
+    const fetchFn = fetchMock();
+    const beforeAttempt = vi.fn(() =>
+      Promise.reject(new RateLimitExceededError("synthetic rate limit")),
+    );
+
+    await expect(
+      callOpenAiResponses(
+        { model: "gpt-4o-mini" },
+        { apiKey: API_KEY, fetchFn, waitFn: noopWait, beforeAttempt },
+      ),
+    ).rejects.toBeInstanceOf(RateLimitExceededError);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(beforeAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it("never fetches when beforeAttempt rejects with UsageLimitExceededError, and propagates it unchanged", async () => {
+    const fetchFn = fetchMock();
+    const beforeAttempt = vi.fn(() =>
+      Promise.reject(new UsageLimitExceededError("synthetic usage ceiling")),
+    );
+
+    await expect(
+      callOpenAiResponses(
+        { model: "gpt-4o-mini" },
+        { apiKey: API_KEY, fetchFn, waitFn: noopWait, beforeAttempt },
+      ),
+    ).rejects.toBeInstanceOf(UsageLimitExceededError);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("does not retry a beforeAttempt rejection, even though it looks like it could be attempt 1 of many", async () => {
+    const fetchFn = fetchMock().mockResolvedValue(jsonResponse({ output: [] }));
+    const beforeAttempt = vi.fn(() =>
+      Promise.reject(new UsageLimitExceededError("synthetic usage ceiling")),
+    );
+
+    await expect(
+      callOpenAiResponses(
+        { model: "gpt-4o-mini" },
+        { apiKey: API_KEY, fetchFn, waitFn: noopWait, beforeAttempt, maxAttempts: 3 },
+      ),
+    ).rejects.toBeInstanceOf(UsageLimitExceededError);
+    expect(beforeAttempt).toHaveBeenCalledTimes(1);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("stops calling beforeAttempt once the budget is exhausted mid-retry (second attempt never fetches)", async () => {
+    const fetchFn = fetchMock().mockResolvedValueOnce(
+      jsonResponse({ error: { message: "server error" } }, 503),
+    );
+    const beforeAttempt = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new UsageLimitExceededError("synthetic usage ceiling"));
+
+    await expect(
+      callOpenAiResponses(
+        { model: "gpt-4o-mini" },
+        { apiKey: API_KEY, fetchFn, waitFn: noopWait, beforeAttempt },
+      ),
+    ).rejects.toBeInstanceOf(UsageLimitExceededError);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(beforeAttempt).toHaveBeenCalledTimes(2);
   });
 });
 

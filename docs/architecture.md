@@ -1,11 +1,13 @@
 # Architecture
 
 Status: **Foundation, domain, D1 repository layer, the Telegram webhook
-boundary, OpenAI translation, speaker memory, and the command surface are
-implemented (Phase 6 complete).** `POST /telegram/webhook` verifies the
-Secret header, parses the Update, detects a command (if any), gates on
-the allowed-chat state and dedupe tables, and then routes to one of two
-completely separate paths:
+boundary, OpenAI translation, speaker memory, the command surface, and
+reliability/security hardening are implemented (Phase 7 complete).**
+`POST /telegram/webhook` verifies the Secret header, parses the Update,
+detects a command (if any), gates on the allowed-chat state and dedupe
+tables, applies the per-chat inbound rate limit (see "Rate limiting and
+usage ceilings" below), and then routes to one of two completely
+separate paths:
 
 - **Command path** (Phase 6): reads speaker memory only for `/status`
   and `/profile`'s own display (never for a translation), mutates
@@ -25,9 +27,10 @@ completely separate paths:
 
 Both paths are orchestrated from `src/handlers/telegram-webhook.ts`.
 Every OpenAI/Telegram call in tests is mocked; no real OpenAI/Telegram
-API call has been made, and the Phase 5 and Phase 6 D1 migrations
-(`migrations/0002_speaker_memory.sql`, `migrations/0003_commands.sql`)
-have each been applied and tested only locally, not against the remote
+API call has been made, and the Phase 5, Phase 6, and Phase 7 D1
+migrations (`migrations/0002_speaker_memory.sql`,
+`migrations/0003_commands.sql`, `migrations/0004_reliability.sql`) have
+each been applied and tested only locally, not against the remote
 database. No Telegram bot has been created, no Secret is registered, no
 webhook is registered with Telegram, and the Worker is not deployed —
 those four actions, plus the remote migrations, are deferred to Phase 8.
@@ -185,8 +188,9 @@ rule 2.
   duplicate-reply risk (if the original `sendMessage` actually succeeded
   server-side but the success response was lost before the Worker could
   observe it) in exchange for not silently dropping a message whose
-  translation was never actually delivered. Phase 7 may revisit this
-  trade-off with a stronger idempotency mechanism.
+  translation was never actually delivered. Phase 7 kept this trade-off
+  as-is (out of the 5-pillar scope); a future phase may revisit it with a
+  stronger idempotency mechanism.
 - If D1 is unavailable, the request fails safe (500): no translation is
   posted with stale/guessed speaker settings silently substituted for
   explicit ones. This includes a speaker-memory read failure: the
@@ -204,9 +208,15 @@ rule 2.
   was already sent. See "Speaker memory read/write ordering" below.
 - The bot never automatically posts an error-explanation message to the
   family group for any of the failures above — a failure is visible only
-  as an absent reply plus a 500 response to Telegram (and, once Phase 7
-  adds structured logging, an operator-visible log entry without message
-  text).
+  as an absent reply plus a 500 response to Telegram, and (Phase 7) a
+  single structured, field-allowlisted log entry with no message text or
+  Secrets — see "Rate limiting and usage ceilings" and "Structured
+  logging" below.
+- **A per-chat inbound rate limit or an OpenAI usage limit is a safe,
+  expected outcome, not an error.** Exceeding either responds 200 (never 500) and keeps the dedupe reservation, so a Telegram redelivery of the
+  same update is processed as a plain `ignored:duplicate` instead of
+  repeating the blocked work. See "Rate limiting and usage ceilings"
+  below.
 
 ## Speaker memory read/write ordering
 
@@ -247,10 +257,6 @@ written back best-effort, after the Telegram reply — see
    observed-style update is an acceptable, low-severity outcome (the next
    message from the same speaker will simply be missing one style
    observation); a duplicate reply to the family group is not.
-   Phase 7 (structured logging) is the natural place to make this
-   swallowed failure operator-visible — as a status/error-class log
-   entry, never message text or Secrets — without changing this
-   response/dedupe behavior.
 
 ## Command routing and chat state
 
@@ -397,9 +403,198 @@ Net effect: a transient failure keeps Telegram's redelivery useful (the
 second delivery is processed as if it were the first), while a permanent
 failure bounds retries to exactly one doomed attempt instead of an
 unbounded loop. This is an interim design scoped to Phase 4's existing
-schema; Phase 7 ("Reliability and security") is expected to revisit
-concurrency correctness under real load more rigorously (e.g. a
-reservation TTL/lease instead of a release-on-error signal).
+schema.
+
+### Concurrent dedupe correctness (Phase 7)
+
+`recordUpdateIfNew`'s atomicity — the property that exactly one of
+several _simultaneous_ deliveries of the same `update_id` succeeds — was
+designed in Phase 2 but not exercised under genuine concurrency until
+Phase 7. `test/infrastructure/d1/repositories.test.ts` fires several
+`recordUpdateIfNew` calls for the same `update_id` via `Promise.all` and
+asserts exactly one `true`, the rest `false`, and exactly one resulting
+row; a second test does the same for distinct `update_id`s and expects
+every reservation to succeed independently. This is treated as the
+authoritative concurrency check — a webhook-level end-to-end concurrency
+test was considered but not added, since the test runtime does not
+reliably reproduce genuinely simultaneous request handling at that
+layer; the repository-level `Promise.all` test exercises the same D1
+`INSERT`-with-`PRIMARY KEY`-conflict mechanism the webhook actually
+depends on. No application-side mutex or in-memory lock is used
+anywhere in this project — a module-global lock would not work across
+Cloudflare's isolate model (concurrent requests can be handled by
+different isolates with no shared memory), so D1's own atomic write is
+the only correctness mechanism, unchanged in design from Phase 2.
+
+## Rate limiting and usage ceilings (Phase 7)
+
+Implemented entirely on the existing D1 `DB` binding — no new Cloudflare
+Rate Limiting binding or other remote service this phase (a future
+migration to Cloudflare-native Rate Limiting may be worth considering
+once real usage data exists, but nothing about this design requires it).
+Three independent, non-secret `wrangler.jsonc` vars, validated by
+`validateReliabilityConfig()` (`src/config/reliability-config.ts`, kept
+separate from `validateAppConfig()` so the command path still never
+depends on OpenAI translation config — see "A command message never
+invokes OpenAI" above):
+
+| Var                                       | Default | Scope                                    |
+| ----------------------------------------- | ------- | ---------------------------------------- |
+| `MAX_HANDLED_UPDATES_PER_CHAT_PER_MINUTE` | 60      | Per allowlisted chat, per UTC minute     |
+| `MAX_OPENAI_ATTEMPTS_PER_CHAT_PER_MINUTE` | 20      | Per chat, per UTC minute                 |
+| `MAX_OPENAI_ATTEMPTS_PER_DAY`             | 300     | Global (all chats combined), per UTC day |
+
+**Per-chat inbound handled-update limit.** Checked in
+`src/handlers/telegram-webhook.ts` immediately **after** the dedupe
+reservation and before the command/translation branch, so it applies
+equally to commands and ordinary text, and — critically — a Telegram
+redelivery of an already-reserved `update_id` never consumes the counter
+a second time (dedupe always runs first). Backed by
+`consumeChatHandledUpdateLimit`
+(`src/infrastructure/d1/reliability-counters.ts`), scope `chat_updates`.
+Exceeding it: HTTP 200, outcome `ignored:rate-limited`, dedupe
+reservation **kept**, no command execution, no Telegram reply, no
+speaker-memory read, no OpenAI call.
+
+**Per-chat OpenAI attempt burst limit and the global daily OpenAI
+ceiling.** Both count real OpenAI HTTP attempts — including the OpenAI
+client's own internal transient-failure retries (`DEFAULT_OPENAI_MAX_ATTEMPTS`,
+see `src/infrastructure/openai/client.ts`) — not logical translation
+requests, since one logical translation can cost up to
+`DEFAULT_OPENAI_MAX_ATTEMPTS` real attempts. `OpenAiApiCallOptions` gained
+an optional `beforeAttempt(): Promise<void>` boundary, called at the top
+of `callOpenAiResponses`'s retry loop immediately before **every**
+attempt (not once per logical call), deliberately **outside** the
+try/catch that classifies transient failures — so a budget rejection
+propagates immediately, is never retried, and is never reclassified as a
+transient upstream error. `infrastructure/openai/` never imports D1
+directly (see "External dependency boundaries" above); the webhook
+builds the actual guard as a closure capturing `chatId` and passes it in:
+
+```
+reserveOpenAiAttempt = async () => {
+  chat-minute reserve (consumeChatOpenAiAttemptLimit, scope "chat_openai")
+    → denied? throw RateLimitExceededError, skip the daily reserve entirely
+  daily reserve (consumeDailyOpenAiAttemptLimit, singleton table)
+    → denied? throw UsageLimitExceededError
+  → both passed: return, and callOpenAiResponses proceeds to fetch
+}
+```
+
+The ordering is deliberately asymmetric: the daily counter is only ever
+incremented for an attempt that already passed its chat-minute check, so
+an attempt blocked by the daily ceiling still costs the chat one unit of
+its per-minute budget (counted as "the chat tried"), but the daily
+counter never grows for an attempt that was already going to be blocked
+for an unrelated reason. Worked retry example: attempt #1 reserves both
+budgets, fetches, gets a transient 503; the retry loop's attempt #2 calls
+`beforeAttempt` again — if the daily budget was exhausted in between (by
+this chat or another), attempt #2's own reservation is denied and the
+second fetch never happens, yielding a safe `ignored:usage-limit`
+instead of a second real HTTP call. `DEFAULT_OPENAI_MAX_ATTEMPTS` is
+unchanged by this phase — no retry loop is unbounded.
+
+Exceeding the chat-minute limit: HTTP 200, outcome
+`ignored:rate-limited`, `limitType: "chat-openai"`. Exceeding the daily
+ceiling: HTTP 200, outcome `ignored:usage-limit`, `limitType:
+"openai-daily"`. Both keep the dedupe reservation. Both are represented
+by `RateLimitExceededError`/`UsageLimitExceededError`
+(`src/shared/errors.ts`) — direct `AppError` subclasses, **not**
+`UpstreamServiceError` subclasses, since they represent an expected,
+safe control-flow outcome rather than an upstream failure; the webhook's
+existing `error instanceof TransientUpstreamError` dedupe-release check
+does not match them, so the reservation is kept by construction, not by
+a special case.
+
+**Commands never consume the OpenAI counters.** `src/application/execute-command.ts`
+has no OpenAI import and is never given a `beforeAttempt` boundary — only
+the translation path (`src/application/translate-and-reply.ts`) reserves
+OpenAI attempts. Commands are still subject to the per-chat
+handled-update limit above, since that limit counts all handled updates
+regardless of path.
+
+### Atomic counter storage
+
+`migrations/0004_reliability.sql` adds two tables (see
+`docs/data-model.md` for the full schema): `rate_limit_counters` (one row
+per `(scope_type, scope_id)` — `scope_type` is `'chat_updates'` or
+`'chat_openai'`, `scope_id` is the Telegram chat ID) and a singleton
+`openai_daily_usage`. Neither table ever grows per-request — a window
+(or day) rollover overwrites the existing row's `window_id`/`day_id` and
+resets its count in place, via a single atomic
+UPSERT-with-`RETURNING` statement
+(`src/infrastructure/d1/reliability-counters.ts`): the same window
+increments in place, a new window resets to 1, and the returned count is
+compared against the limit in the same statement's result — never a
+separate read-then-write. This was verified directly against local D1
+(`wrangler d1 execute --local`) before being wired into the repository,
+and is covered by `test/infrastructure/d1/reliability-counters.test.ts`
+(allow-up-to-limit-then-block, blocked-requests-still-increment,
+window/day-reset, and — explicitly — that the table never accumulates
+more than one row per scope after many window rollovers). A blocked
+request **still increments** the counter (an accepted trade-off, since
+window rollover bounds growth regardless). `nowMs` (and the derived
+minute/day window IDs, `src/shared/time-windows.ts`) is always passed in
+by the caller, never read from `Date.now()` inside the repository, so
+window-boundary behavior is deterministically unit-testable.
+
+A raw D1 query/runtime failure while consuming a counter becomes a
+`TransientUpstreamError(service: "d1")` via the same `runD1Query` helper
+Phase 5/6 use for every other D1 call — 500, dedupe reservation
+**released**, no OpenAI/Telegram call. A malformed/negative returned
+count (never producible by the real `CHECK`-constrained schema, only by
+direct tampering or future schema drift) becomes a
+`PermanentUpstreamError` — 500, dedupe reservation **kept** — matching
+the same defense-in-depth pattern used for a malformed speaker-memory row
+(see "Speaker memory read/write ordering" above).
+
+## Structured logging (Phase 7)
+
+`src/shared/structured-log.ts` is the sole place `console.log` is called
+from application code (one `eslint-disable-next-line no-console`,
+documenting that this is the intentional boundary, not a scattered
+pattern). `LogFields` is a strict allowlisted-field type — `event`,
+`outcome`, `status`, `durationMs`, `updateId`, `chatId`, `errorClass`,
+`service`, `limitType`, `attempt`, `retryCount` — so a field outside this
+list cannot be logged even by accident; there is no "extra data" escape
+hatch. `classifyError(error)` is the sanctioned way to turn a caught
+`unknown` into safe fields: it extracts only `error.name` (never
+`.message` or `.stack`), plus `service` via a proper `isUpstreamService`
+type guard (never an unchecked cast) when the error carries one.
+**Never logged, by construction:** source message text, translated text,
+reply-context text, command text, correction source/target terms,
+display names, OpenAI prompts, raw OpenAI/Telegram responses, Secret
+values, and raw `Error.message`/stack traces —
+`test/shared/structured-log.test.ts` and
+`test/handlers/telegram-webhook-security.test.ts` assert this directly,
+using identifiable synthetic strings that must never appear in captured
+log output.
+
+`src/handlers/telegram-webhook.ts`'s `finish(response, startedAt,
+fields)` helper wraps every response-returning exit point, so exactly
+one structured log line is emitted per request — covering the 401
+Secret-rejection, every `400`/`ignored:*` outcome, `translated`, every
+`command:*` outcome, and the classified 500 — rather than multiple log
+lines per request. `status` and `durationMs` are computed automatically
+inside `finish`, never passed in by each call site.
+
+## Error classification matrix
+
+| Category           | Example                                                                                                                                                | HTTP status                  | Dedupe reservation       | Continues to OpenAI/Telegram?                           |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------- | ------------------------ | ------------------------------------------------------- |
+| Validation/input   | Malformed JSON, invalid Update shape                                                                                                                   | 400                          | n/a (before reservation) | No                                                      |
+| Configuration      | Missing/invalid required config (fails closed)                                                                                                         | 500                          | Kept                     | No                                                      |
+| Rate limit         | Per-chat handled-update or OpenAI-minute limit exceeded                                                                                                | 200 (`ignored:rate-limited`) | Kept                     | No                                                      |
+| Usage limit        | Global daily OpenAI attempt ceiling exceeded                                                                                                           | 200 (`ignored:usage-limit`)  | Kept                     | No                                                      |
+| Transient upstream | Network/timeout/429/5xx from OpenAI, Telegram, or D1, after retries exhausted                                                                          | 500                          | Released                 | No (the failing call itself already happened/exhausted) |
+| Permanent upstream | Malformed OpenAI response, permanent Telegram rejection, malformed D1 row, `/disable` reply-failure-after-mutation-succeeded (Phase 6 review, Issue 1) | 500                          | Kept                     | No                                                      |
+
+This table is unchanged in substance from the per-case rules already
+documented above (Error-time behavior, Speaker memory read/write
+ordering, Command routing and chat state, Dedupe and retry) — it exists
+as a single consolidated reference, added by the Phase 7 security
+regression pass, and every row is cross-checked against those sections by
+name so the two never drift silently out of sync.
 
 ## What this Worker does _not_ do (see `docs/implementation-plan.md`)
 

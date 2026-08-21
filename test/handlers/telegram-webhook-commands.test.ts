@@ -213,6 +213,8 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM processed_updates"),
     env.DB.prepare("DELETE FROM allowed_chats"),
     env.DB.prepare("DELETE FROM bot_admins"),
+    env.DB.prepare("DELETE FROM rate_limit_counters"),
+    env.DB.prepare("DELETE FROM openai_daily_usage"),
   ]);
 });
 

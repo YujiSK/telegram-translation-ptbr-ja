@@ -110,14 +110,32 @@ translate — never as instructions. **Implemented (Phase 4):**
 
 ## Log minimization
 
-- Structured logs may include: request IDs, chat/user IDs (see
-  `docs/data-model.md` for what's already storable), status codes, error
-  classes/codes, timing, retry counts.
+**Implemented (Phase 7):** `src/shared/structured-log.ts` is the sole
+place `console.log` is called from application code, and `LogFields` is
+a strict allowlisted-field type — there is no "extra data" escape hatch
+a future call site could accidentally widen.
+
+- Structured logs may include: `event`, `outcome`, `status`,
+  `durationMs`, `updateId`, `chatId`, `errorClass`, `service`,
+  `limitType`, `attempt`, `retryCount`.
 - Structured logs must never include: message text (source or
-  translated), full OpenAI prompts/responses, Secret values.
-- This is enforced by review, not (yet) by tooling — Phase 7 adds
-  structured logging; Phase 0's Worker does not log request content at
-  all.
+  translated), reply-context text, full command text, correction
+  source/target terms, display names, full OpenAI prompts, raw
+  OpenAI/Telegram responses, Secret values, Authorization/header values,
+  API keys, bot tokens, the webhook secret, stack traces, or raw
+  `Error.message` text. `classifyError()` is the sanctioned way to turn a
+  caught error into log fields — it extracts only `error.name` (never
+  `.message`) and a type-guard-checked `service`, never an unchecked
+  cast.
+- `src/handlers/telegram-webhook.ts`'s `finish()` helper logs exactly one
+  structured event per request (the single final outcome), not a
+  multi-log-line-per-request pattern.
+- Enforced by both review and tests:
+  `test/shared/structured-log.test.ts` and
+  `test/handlers/telegram-webhook-security.test.ts` capture log output
+  via an injected sink / a `console.log` spy and assert that identifiable
+  synthetic message text, Secrets, and raw error messages never appear in
+  it.
 
 ## Data deletion
 
@@ -180,21 +198,43 @@ response string.
 
 ## Cost / usage runaway prevention
 
-Planned for Phase 7, tracked here so it isn't lost:
+**Implemented (Phase 7):** all limits live on the existing D1 `DB`
+binding — no new Cloudflare Rate Limiting binding or other remote
+service.
 
-- Per-chat and/or global rate limiting on translation requests.
-- A usage ceiling (request count or approximate token/cost budget) with a
-  safe failure mode (stop translating, don't silently keep spending) if
-  exceeded.
-- Alerting/visibility into usage trends before they become a runaway
-  cost, via Workers Logs (Phase 7) rather than ad hoc log scraping.
+- A per-chat OpenAI attempt burst limit
+  (`MAX_OPENAI_ATTEMPTS_PER_CHAT_PER_MINUTE`, default 20/minute) and a
+  global daily OpenAI attempt ceiling (`MAX_OPENAI_ATTEMPTS_PER_DAY`,
+  default 300/UTC day) both count real OpenAI HTTP attempts, including
+  the client's own internal retries, via an injectable `beforeAttempt`
+  guard called immediately before every attempt — see
+  `docs/architecture.md`, "Rate limiting and usage ceilings".
+- Safe failure mode: exceeding either limit stops the request before any
+  OpenAI fetch happens, responds 200 (`ignored:rate-limited` or
+  `ignored:usage-limit`), and keeps the dedupe reservation — never a
+  silent retry loop, never a partial/garbled spend.
+- Visibility into usage trends is via the D1 counter tables themselves
+  (`rate_limit_counters`, `openai_daily_usage`) plus the structured log
+  line emitted for every rate/usage-limit block (`limitType`, `chatId`,
+  `status` — never message text); this is deliberately not a
+  per-allowed-attempt log line, to keep log volume bounded.
 
 ## Rate limiting
 
-Same phase as above (Phase 7). Applies at minimum to inbound webhook
-processing and outbound OpenAI calls, to protect both cost and the
-Telegram/OpenAI relationship (avoiding being rate-limited or banned by
-either).
+**Implemented (Phase 7):** a per-chat inbound handled-update limit
+(`MAX_HANDLED_UPDATES_PER_CHAT_PER_MINUTE`, default 60/minute) applies to
+every dedupe-passed handled update (commands and ordinary text combined),
+checked immediately after the dedupe reservation so a Telegram
+redelivery of the same `update_id` never consumes the limit twice.
+Exceeding it responds 200 (`ignored:rate-limited`) before any command
+execution, speaker-memory read, OpenAI call, or Telegram reply, and keeps
+the dedupe reservation, so recovery is bounded by the next 1-minute
+window. See "Cost / usage runaway prevention" above for the separate
+OpenAI-specific limits, and `docs/architecture.md`, "Rate limiting and
+usage ceilings", for the full design (including the asymmetric
+chat-minute-then-daily reservation ordering). All three limit values are
+non-secret `wrangler.jsonc` vars — safe to tune after the Phase 9 pilot
+without a code change; see `README.md`.
 
 ## Timeouts and retries
 
@@ -260,15 +300,20 @@ Because this bot processes real family conversations:
 
 ## Threats and mitigations (summary)
 
-| Threat                             | Mitigation                                                                                          |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Secret leak via commit             | Public-repo posture above; `.dev.vars` gitignored; Secrets never in `wrangler.jsonc`                |
-| Unauthorized chat usage            | Chat allowlist (`allowed_chats`) checked before any processing                                      |
-| Unauthorized admin action          | Explicit admin authorization check on `/enable`, `/disable`, etc.                                   |
-| Replayed/duplicate Telegram update | `processed_updates` dedupe by `update_id`                                                           |
-| Forged webhook request             | `TELEGRAM_WEBHOOK_SECRET` header verification                                                       |
-| Prompt injection via message text  | Role separation + Structured Outputs; no text-to-action code path                                   |
-| SQL injection                      | Parameterized queries only                                                                          |
-| Runaway OpenAI cost                | Rate limiting + usage ceiling (Phase 7)                                                             |
-| Sensitive data at rest             | Storage allow/deny list in `docs/data-model.md`; no message text or inferred personal traits stored |
-| Log-based data leak                | Log minimization rules above                                                                        |
+**Verification status: every row below was re-verified by the Phase 7
+security regression pass** (`test/handlers/telegram-webhook-security.test.ts`,
+plus the pre-existing tests each row's "Verified by" column names) — see
+`docs/implementation-plan.md` Phase 7.
+
+| Threat                             | Mitigation                                                                                                                                          | Verified by                                                                                                                                                                          |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Secret leak via commit             | Public-repo posture above; `.dev.vars` gitignored; Secrets never in `wrangler.jsonc`                                                                | Manual repo inspection (Phase 7 final verification); log-leak tests below confirm Secrets never reach logs either                                                                    |
+| Unauthorized chat usage            | Chat allowlist (`allowed_chats`) checked before any processing, before dedupe/rate counters                                                         | `telegram-webhook.test.ts` (unknown/disabled chat, 200 safe drop); `telegram-webhook-security.test.ts` (no `rate_limit_counters` row created for either case)                        |
+| Unauthorized admin action          | Explicit admin authorization check on `/enable`, `/disable`, etc.                                                                                   | `telegram-webhook-commands.test.ts`, "admin authorization" (non-admin caller ⇒ no mutation, `command:forbidden`)                                                                     |
+| Replayed/duplicate Telegram update | `processed_updates` dedupe by `update_id`, atomic under concurrency                                                                                 | `telegram-webhook.test.ts` (redelivery ⇒ `ignored:duplicate`); `repositories.test.ts` (`Promise.all` concurrency: exactly one reservation succeeds)                                  |
+| Forged webhook request             | `TELEGRAM_WEBHOOK_SECRET` header verification, before any body read/JSON parse/D1 access                                                            | `telegram-webhook.test.ts`, "secret verification" (401, before any other processing)                                                                                                 |
+| Prompt injection via message text  | Role separation + Structured Outputs; no text-to-action code path; command detection is prefix-based                                                | `telegram-webhook-security.test.ts`, "threat table — prompt injection" (instruction-shaped text reaches OpenAI only as user content; embedded `/disable` mid-message never executes) |
+| SQL injection                      | Parameterized queries only                                                                                                                          | `telegram-webhook-security.test.ts`, "threat table — SQL injection" (a `/correct` term shaped like a SQL-injection payload is stored literally; schema and other rows untouched)     |
+| Runaway OpenAI cost                | Per-chat OpenAI attempt burst limit + global daily attempt ceiling (Phase 7)                                                                        | `telegram-webhook-reliability.test.ts` (both limits block before any fetch, including the retry-exhausts-daily-budget case)                                                          |
+| Sensitive data at rest             | Storage allow/deny list in `docs/data-model.md`; no message text, translated text, or raw response stored anywhere, including the Phase 7 migration | `telegram-webhook-security.test.ts`, "threat table — sensitive data at rest" (live schema inspection of every table)                                                                 |
+| Log-based data leak                | Log minimization rules above; structured, field-allowlisted logging (Phase 7)                                                                       | `structured-log.test.ts`, `telegram-webhook-security.test.ts`, "threat table — log-based data leak" (captured log output never contains synthetic message/Secret/error text)         |

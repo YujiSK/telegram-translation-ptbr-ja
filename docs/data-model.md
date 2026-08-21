@@ -1,6 +1,6 @@
 # Data Model
 
-Status: **Phase 2, Phase 5, and Phase 6 schema implemented.**
+Status: **Phase 2, Phase 5, Phase 6, and Phase 7 schema implemented.**
 `migrations/0001_initial.sql` creates `allowed_chats`, `processed_updates`,
 and `speaker_profiles` for local development and tests. The remote D1
 database is provisioned and configured, and `0001_initial.sql` was
@@ -8,13 +8,25 @@ applied remotely on 2026-08-14. `migrations/0002_speaker_memory.sql`
 (Phase 5) adds `observed_tone`/`observed_emoji_usage` to
 `speaker_profiles` and creates `speaker_preferences` and
 `translation_corrections`; `migrations/0003_commands.sql` (Phase 6)
-creates `bot_admins`. Both are verified with
-`wrangler d1 migrations apply --local` and by the Workers Vitest test
-suite
-(`test/infrastructure/d1/{repositories,speaker-memory-repositories,bot-admins,forget-me}.test.ts`),
-but **neither** is applied to the remote database (that's Phase 8). The
+creates `bot_admins`; `migrations/0004_reliability.sql` (Phase 7) creates
+`rate_limit_counters` and `openai_daily_usage`. All three are verified
+with `wrangler d1 migrations apply --local` and by the Workers Vitest
+test suite
+(`test/infrastructure/d1/{repositories,speaker-memory-repositories,bot-admins,forget-me,reliability-counters}.test.ts`),
+but **none** is applied to the remote database (that's Phase 8). The
 remaining tables below stay plans for the later phases that own their
 behavior.
+
+**No message content anywhere in this schema, confirmed through Phase
+7:** neither `rate_limit_counters` nor `openai_daily_usage` — nor any
+table added in any migration — stores a message body, a translated
+string, a full OpenAI prompt, or a raw OpenAI/Telegram response.
+`rate_limit_counters.scope_id` is a Telegram chat ID (an identifier, not
+content); every other column in both new tables is a window/day
+identifier, a count, or a timestamp. This is asserted directly by
+`test/handlers/telegram-webhook-security.test.ts`, which inspects every
+table's live `CREATE TABLE` schema in `sqlite_master` and fails if any
+table gains a column shaped like message/translation/response content.
 
 General privacy rule for every table below: **never store message text,
 full OpenAI prompts, or Secrets.** See `docs/security-and-privacy.md` for
@@ -183,8 +195,76 @@ update; this table prevents double-processing.
   question** for Phase 2/7
 - **Index candidates:** primary key lookup only
 - **Implemented columns:** `update_id` primary key and `processed_at`.
-- **Deferred decision:** retention window and cleanup mechanism belong to
-  Phase 7 reliability work; D1 has no native TTL.
+- **Deferred decision:** an explicit retention window/cleanup job was
+  considered in Phase 7 but not implemented — this table's atomic
+  `INSERT`-with-`PRIMARY KEY`-conflict is what Phase 7's concurrent
+  dedupe verification exercises (see `docs/architecture.md`, "Concurrent
+  dedupe correctness"), but pruning old rows remains an open question for
+  a future phase; D1 has no native TTL.
+
+## `rate_limit_counters`
+
+**Implementation status:** Phase 7 schema implemented
+(`migrations/0004_reliability.sql`); read/written via
+`consumeChatHandledUpdateLimit`/`consumeChatOpenAiAttemptLimit` in
+`src/infrastructure/d1/reliability-counters.ts`.
+
+**Purpose:** Backs two independent per-chat rate limits — the inbound
+handled-update limit and the OpenAI attempt burst limit (see
+`docs/architecture.md`, "Rate limiting and usage ceilings") — using a
+single small table instead of one row per request.
+
+- **Implemented primary key:** `(scope_type, scope_id)` — one row per
+  scope, never one row per request or per time window, so the table
+  never grows unbounded. A window rollover overwrites the existing row's
+  `window_id` and resets `request_count` in place.
+- **Implemented columns:** `scope_type`, `scope_id` (a Telegram chat ID),
+  `window_id` (an integer minute-bucket, `Math.floor(nowMs / 60_000)`,
+  computed by `src/shared/time-windows.ts`), `request_count`,
+  `updated_at`.
+- **Implemented constraint:** `scope_type` is a fixed `CHECK` enum —
+  `'chat_updates'` (the inbound handled-update limit) or `'chat_openai'`
+  (the OpenAI attempt burst limit) — and `request_count >= 0`.
+- **Must not store:** message content, command text, or anything beyond
+  the chat ID, a window identifier, and a count.
+- **Atomicity:** every read-and-increment is a single UPSERT-with-
+  `RETURNING` SQL statement, never a separate read then write — see
+  `docs/architecture.md`, "Atomic counter storage".
+- **Retention:** indefinite, but bounded in size by design — at most one
+  row per `(scope_type, scope_id)` pair ever exists, regardless of how
+  many requests or how much time passes.
+- **Index candidates:** primary key lookup only (small table, one row per
+  active chat per scope).
+
+## `openai_daily_usage`
+
+**Implementation status:** Phase 7 schema implemented
+(`migrations/0004_reliability.sql`); read/written via
+`consumeDailyOpenAiAttemptLimit` in
+`src/infrastructure/d1/reliability-counters.ts`.
+
+**Purpose:** Backs the single global daily OpenAI attempt ceiling (see
+`docs/architecture.md`, "Rate limiting and usage ceilings") — a
+cost/runaway-usage guardrail shared across every chat, not a per-chat
+limit.
+
+- **Implemented primary key:** `singleton`, `CHECK (singleton = 1)` — by
+  design there is exactly one row, ever; a day rollover overwrites
+  `day_id` and resets `attempt_count` in place instead of inserting a
+  new row.
+- **Implemented columns:** `singleton`, `day_id` (an integer UTC-day
+  bucket, `Math.floor(nowMs / 86_400_000)`, computed by
+  `src/shared/time-windows.ts` — UTC, not local time, so there is no
+  timezone dependency), `attempt_count`, `updated_at`.
+  `attempt_count >= 0` is enforced by a `CHECK`.
+- **Must not store:** anything beyond the day identifier and a count —
+  no per-chat breakdown (that's what `rate_limit_counters`' `chat_openai`
+  scope is for).
+- **Atomicity:** same UPSERT-with-`RETURNING` pattern as
+  `rate_limit_counters` — see `docs/architecture.md`, "Atomic counter
+  storage".
+- **Retention:** indefinite, but exactly one row, always.
+- **Index candidates:** none needed (single-row table).
 
 ## `bot_admins`
 
@@ -293,10 +373,12 @@ code later:
   correction-specific removal mechanism) were deferred to Phase 6 in
   Phase 5 — Phase 5 only implemented the read/write repository functions
   Phase 6's commands would call. **Implemented (Phase 6)** — see below.
-- **Reliability/observability hardening** (e.g. making a swallowed
-  observed-profile-write failure operator-visible, retention policies)
-  is deferred to Phase 7 — see `docs/architecture.md`, "Speaker memory
-  read/write ordering".
+- **Reliability/observability hardening:** Phase 7 added structured
+  logging (`docs/architecture.md`, "Structured logging") and rate/usage
+  limiting, but did not change the speaker-memory read/write
+  success/failure semantics themselves, and retention policies for
+  `processed_updates` remain an open question for a future phase — see
+  `docs/architecture.md`, "Speaker memory read/write ordering".
 
 ## Phase 6 command-surface design decisions (summary)
 
@@ -335,12 +417,44 @@ user_id)` in the **current chat only** — never Telegram-wide, never
   suite. Applying it remotely is a Phase 8 action, same as
   `0002_speaker_memory.sql`.
 
+## Phase 7 reliability-schema design decisions (summary)
+
+Recorded here so they don't have to be re-derived from the migration or
+code later:
+
+- **`rate_limit_counters` is one table backing two independent scopes**
+  (`chat_updates`, `chat_openai`), distinguished by `scope_type`, rather
+  than two separate tables — both share the exact same
+  one-row-per-scope/atomic-UPSERT shape, so a single table with a
+  discriminator column was simpler than duplicating the schema and the
+  repository logic.
+- **Neither counter table ever grows per-request.** This was a hard
+  requirement, not an optimization: a naive "insert one row per request"
+  design would make both tables grow unboundedly for as long as the bot
+  runs. The `PRIMARY KEY (scope_type, scope_id)` / singleton-`CHECK`
+  design makes unbounded growth structurally impossible.
+- **A blocked (rate-limited or usage-limited) request still increments
+  its counter.** This was an explicit, accepted trade-off — the
+  alternative (only counting allowed requests) would let a chat retry
+  indefinitely within the same window without ever being counted against
+  future windows, defeating the limit's purpose.
+- **`openai_daily_usage` is global, not per-chat, by design** — it is a
+  cost/runaway-usage ceiling for the whole bot, independent of
+  `rate_limit_counters`' per-chat `chat_openai` scope, which exists to
+  stop one chat from starving the others' share of the daily budget.
+- **The Phase 7 migration (`0004_reliability.sql`) has not been applied
+  to the remote database** — only verified locally
+  (`wrangler d1 migrations apply --local`) and by the Workers Vitest
+  suite. Applying it remotely is a Phase 8 action, same as
+  `0002_speaker_memory.sql` and `0003_commands.sql`.
+
 ## Migration policy
 
 The first migration is `migrations/0001_initial.sql`; the second is
 `migrations/0002_speaker_memory.sql` (Phase 5); the third is
-`migrations/0003_commands.sql` (Phase 6). Future migrations are created
-with:
+`migrations/0003_commands.sql` (Phase 6); the fourth is
+`migrations/0004_reliability.sql` (Phase 7). Future migrations are
+created with:
 
 ```sh
 npx wrangler d1 migrations create <database-name> <description>
@@ -350,6 +464,8 @@ This creates a numbered `.sql` file per Cloudflare's D1 migration workflow
 (https://developers.cloudflare.com/d1/reference/migrations/). Migrations
 are applied with `wrangler d1 migrations apply` (`--local` for local dev,
 `--remote` for the deployed database) — not run manually against
-production. `0002_speaker_memory.sql` and `0003_commands.sql` have each
-been applied and tested with `--local` only; a `--remote` apply requires
-the same explicit approval as any other Phase 8 action.
+production. `0002_speaker_memory.sql`, `0003_commands.sql`, and
+`0004_reliability.sql` have each been applied and tested with `--local`
+only (in order, `0001` → `0002` → `0003` → `0004`, applying cleanly as a
+sequence); a `--remote` apply requires the same explicit approval as any
+other Phase 8 action.

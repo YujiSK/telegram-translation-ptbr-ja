@@ -25,6 +25,15 @@
     // messages) to bound OpenAI cost/latency per message. Tune freely —
     // it's read at request time, not baked into any schema.
     "MAX_TRANSLATABLE_MESSAGE_LENGTH": "2000",
+    // Phase 7 reliability/cost limits — see src/config/reliability-config.ts
+    // and docs/security-and-privacy.md. Family-scale initial defaults,
+    // safe to tune after the Phase 9 pilot; none of these are Secrets.
+    // Per allowlisted chat: handled (command + translation) updates per minute.
+    "MAX_HANDLED_UPDATES_PER_CHAT_PER_MINUTE": "60",
+    // Per chat: OpenAI HTTP attempts (including retries) per minute.
+    "MAX_OPENAI_ATTEMPTS_PER_CHAT_PER_MINUTE": "20",
+    // Whole bot: OpenAI HTTP attempts (including retries) per UTC day.
+    "MAX_OPENAI_ATTEMPTS_PER_DAY": "300",
   },
   // The remote database exists and 0001_initial.sql has been applied.
   // The Worker has not been deployed. Local commands use local D1 by default.

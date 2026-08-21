@@ -1,6 +1,6 @@
 # Implementation Plan
 
-**Current phase: Phase 6 completed; Phase 7 not started.** OpenAI
+**Current phase: Phase 7 completed; Phase 8 not started.** OpenAI
 translation local implementation: Completed. Structured Outputs mock
 tests: Completed. Telegram reply orchestration mock tests: Completed.
 Speaker Memory local schema: Completed. Memory repository: Completed.
@@ -8,14 +8,19 @@ Effective memory resolution: Completed. Prompt v2: Completed. Mock/local
 D1 tests: Completed. Command surface (`/help`, `/status`, `/profile`,
 `/remember`, `/forget`, `/forgetme`, `/correct`, `/enable`, `/disable`):
 Completed, local schema (`migrations/0003_commands.sql`, `bot_admins`)
-and mock/local D1 tests only. Remote `0002_speaker_memory.sql` and
-`0003_commands.sql` migrations: Pending until Phase 8. Real family
+and mock/local D1 tests only. Reliability/security hardening (concurrent
+dedupe verification, per-chat inbound rate limit, per-chat and global
+daily OpenAI attempt limits, structured logging, security regression
+tests): Completed, local schema (`migrations/0004_reliability.sql`,
+`rate_limit_counters`, `openai_daily_usage`) and mock/local D1 tests
+only. Remote `0002_speaker_memory.sql`, `0003_commands.sql`, and
+`0004_reliability.sql` migrations: Pending until Phase 8. Real family
 profile data: Not stored (only synthetic fixtures exist in tests). Real
-OpenAI/Telegram API test: Not performed (all Phase 4/5/6 tests use a
+OpenAI/Telegram API test: Not performed (all Phase 4/5/6/7 tests use a
 mocked OpenAI/Telegram HTTP response, per design). Telegram Bot creation,
 Cloudflare Secret registration, Worker deployment, and Telegram webhook
 registration: Pending until Phase 8 — see Phase 3, Phase 4, Phase 5,
-Phase 6, and Phase 8 below.
+Phase 6, Phase 7, and Phase 8 below.
 
 Rule for every phase (see `docs/project-rules.md` rules 13–14): implement
 one phase at a time, verify with `npm run check` before moving to the
@@ -362,6 +367,63 @@ scope or design — `npm run check` green (439 tests) and CI green:
 
 ## Phase 7 — Reliability and security
 
+**Status: completed.** Concurrent dedupe correctness under simultaneous
+delivery is verified with a repository-level `Promise.all` test asserting
+exactly one successful reservation for a shared `update_id`
+(`test/infrastructure/d1/repositories.test.ts`) — no application-side
+mutex is used (that would not work across Cloudflare isolates); D1's own
+atomic `INSERT`/`PRIMARY KEY` conflict is the sole correctness mechanism,
+unchanged from Phase 2/3. Rate limiting and cost control are implemented
+entirely on the existing D1 `DB` binding (no new Cloudflare Rate Limiting
+binding or other remote service this phase): a per-chat inbound
+handled-update limit (`MAX_HANDLED_UPDATES_PER_CHAT_PER_MINUTE`, default
+60/minute, checked after dedupe so a Telegram redelivery is never
+double-counted), a per-chat OpenAI attempt burst limit
+(`MAX_OPENAI_ATTEMPTS_PER_CHAT_PER_MINUTE`, default 20/minute), and a
+global daily OpenAI attempt ceiling (`MAX_OPENAI_ATTEMPTS_PER_DAY`,
+default 300/UTC day) — all three new non-secret `wrangler.jsonc` vars,
+validated by a dedicated `validateReliabilityConfig()`
+(`src/config/reliability-config.ts`) kept separate from
+`validateAppConfig()` so the command path still never depends on OpenAI
+translation config, preserving the Phase 6 property. Both limits count
+real OpenAI HTTP attempts (including internal client retries), not
+logical translation requests, via an injectable `beforeAttempt` guard on
+`callOpenAiResponses` (`src/infrastructure/openai/client.ts`) — the
+webhook builds the D1-backed closure so `infrastructure/openai` never
+imports D1 directly. New local-only migration
+`migrations/0004_reliability.sql` adds `rate_limit_counters` (one row per
+`(scope_type, scope_id)`, reset in place on window rollover — never grows
+unbounded) and singleton `openai_daily_usage`; both use an atomic
+UPSERT-with-`RETURNING` statement so increment/reset is a single SQL
+statement, verified against local D1
+(`test/infrastructure/d1/reliability-counters.test.ts`). Exceeding a
+limit responds 200 with `ignored:rate-limited` or `ignored:usage-limit`
+and **keeps** the dedupe reservation (via new `RateLimitExceededError`/
+`UsageLimitExceededError`, safe control-flow signals distinct from
+`TransientUpstreamError`), so a redelivery is a plain duplicate instead of
+repeating work. Structured logging
+(`src/shared/structured-log.ts`) funnels every webhook request's single
+final outcome through one allowlisted-field logger — message text,
+translated text, full command text, correction terms, display names,
+prompts, raw OpenAI/Telegram responses, Secrets, and raw
+`Error.message`/stack traces are never logged; `classifyError()` extracts
+only `error.name` and, for upstream errors, `service`. A new security
+regression suite
+(`test/handlers/telegram-webhook-security.test.ts`) covers the threat
+table in `docs/security-and-privacy.md`: prompt-injection-shaped message
+text (reaches OpenAI only as user-content data, never becomes a command),
+a SQL-injection-shaped `/correct` term (safely parameterized, schema and
+other rows untouched), sensitive-data-at-rest (no message/translated-text/
+raw-response column anywhere in the local D1 schema, including the new
+migration), log-based leak (captured `console.log` output never contains
+synthetic message/Secret/error text), and unauthorized-chat access
+creating no rate-limit counter row. The Phase 6 review-fix `/disable`
+mutation-succeeded-then-reply-fails-transiently ⇒ 500 + dedupe-kept
+behavior is unchanged (its dedicated regression test still passes). `npm
+run check` green (538 tests) and CI green. Remote application of
+`migrations/0004_reliability.sql`, and all deploy/setup actions, remain
+Pending until Phase 8, unchanged from Phase 6.
+
 - **目的:** Harden the bot for real (if small-scale) production traffic:
   dedupe correctness under load, rate/usage limits, structured logging,
   and a security-focused test pass.
@@ -385,9 +447,13 @@ scope or design — `npm run check` green (439 tests) and CI green:
   spend.
 - **Yujiによる手動作業:** Decide concrete rate-limit/usage-ceiling
   numbers appropriate for a family-scale deployment (this is a product
-  decision, not a technical one).
-- **次フェーズへ進む前の停止点:** Stop once reliability/security work is
-  implemented and tested. Confirm before deployment preparation.
+  decision, not a technical one). Initial values (60/20/300) were chosen
+  as family-scale-appropriate safe defaults without real production usage
+  data; tune them after the Phase 9 pilot via the non-secret
+  `wrangler.jsonc` vars — no code change needed.
+- **次フェーズへ進む前の停止点:** Reached. Rate limiting, usage ceiling,
+  structured logging, and the security regression pass are implemented
+  and tested. Confirm before deployment preparation.
 
 ---
 
