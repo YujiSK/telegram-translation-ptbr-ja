@@ -2,9 +2,16 @@
 
 Status: **Foundation, domain, D1 repository layer, the Telegram webhook
 boundary, OpenAI translation, speaker memory, the command surface,
-reliability/security hardening, and Phase 8A deployment-preparation
-tooling are implemented (Phase 8A complete; Phase 8B external actions
-pending separate approval).** `POST /telegram/webhook` verifies the
+reliability/security hardening, Phase 8A deployment-preparation tooling,
+and — Phase 9.1A — a vendor-independent translation-provider router with
+a Cloudflare Workers AI routine adapter (now the default provider,
+implemented and tested locally/in CI only, not deployed) are
+implemented.** See "Translation provider router (Phase 9.1A)" below for
+the router/adapter design; the rest of this document (written before
+Phase 9.1A) still describes the underlying webhook/D1/command
+architecture accurately, with "OpenAI" in the sections below now
+specifically meaning the legacy `TRANSLATION_PROVIDER=openai` path unless
+otherwise noted. `POST /telegram/webhook` verifies the
 Secret header, parses the Update, detects a command (if any), gates on
 the allowed-chat state and dedupe tables, applies the per-chat inbound
 rate limit (see "Rate limiting and usage ceilings" below), and then
@@ -695,6 +702,114 @@ other method to that path (or any unmatched path) falls through to the
 existing generic 404, exactly like every other route in this Worker; no
 new 405 behavior was introduced, to keep routing behavior uniform across
 the whole Worker.
+
+## Translation provider router (Phase 9.1A)
+
+**Implemented, local/CI-only — not deployed.** `src/handlers/telegram-webhook.ts`
+no longer calls `src/infrastructure/openai/translate.ts` directly for the
+translation path; it builds a `TranslateBoundary` via
+`createTranslationRouter` (`src/infrastructure/translation/router.ts`),
+selected by the non-secret `TRANSLATION_PROVIDER` config var
+(`workers-ai` | `openai`, `src/config/app-config.ts`). The router's
+public contract (`TranslateBoundary.translate(request):
+Promise<TranslationOutcome>`) is unchanged from Phase 4/5 — `domain/` and
+`application/translate-and-reply.ts` see the same vendor-independent
+shape regardless of which provider is selected.
+
+- **`workers-ai` mode (implemented, now the default):** calls
+  `src/infrastructure/workers-ai/translate.ts`'s
+  `createWorkersAiTranslationProvider`, which in turn calls
+  `env.AI.run()` through `src/infrastructure/workers-ai/client.ts`'s
+  `callWorkersAiChat` — exactly once per message, never OpenAI. The
+  Workers AI adapter returns an infrastructure-only
+  `ProviderTranslationCandidate` (`src/infrastructure/translation/provider.ts`):
+  `{ outcome, needsEscalation, escalationReason }`. When
+  `needsEscalation` is `false`, the router unwraps `outcome` unchanged.
+  When it is `true`, the router throws `EscalationRequiredError`
+  (`src/shared/errors.ts`) instead of surfacing the provisional
+  `outcome` or calling any other provider — there is no automatic
+  Workers AI → OpenAI (or Gemini) fallback, by design (see
+  `docs/phase9-provider-plan.md`, "bounded fan-out policy").
+- **`openai` mode (implemented, legacy/compatibility path):** calls the
+  existing Phase 4/5 `src/infrastructure/openai/translate.ts` boundary
+  unchanged — behavior, tests, and prompt (`translation-v2.ts`) are
+  identical to before this phase.
+- **No mode calls more than one provider.** `test/infrastructure/translation/router.test.ts`
+  asserts this directly for both modes, including the escalation-required
+  case.
+
+### Workers AI adapter
+
+`src/infrastructure/workers-ai/client.ts`'s `callWorkersAiChat` calls
+`env.AI.run(model, inputs, { signal })` through a narrow
+`WorkersAiBinding` interface (`{ run(model, inputs, options?): Promise<unknown> }`)
+rather than the full generated `Ai` type, so every test can inject a
+synthetic fake instead of the real binding — **no test in this
+repository ever performs a real `env.AI.run()` call**; `vitest.config.ts`
+also sets `remoteBindings: false` so the test pool itself never attempts
+a live Cloudflare connection for the `AI` binding. The model
+(`@cf/zai-org/glm-4.7-flash`) is passed in from `WORKERS_AI_MODEL`
+config — never hard-coded into `provider.ts`, `translate.ts`, or any
+domain/application type. A real `AbortSignal`-based timeout bounds each
+call; there is no automatic retry beyond the one logical Workers AI
+attempt per Telegram delivery (matching `docs/project-rules.md` rules
+7–8 — the existing OpenAI retry budget is unrelated and unchanged).
+
+**Error classification** (`classifyWorkersAiError`, best-effort — the
+generated Workers AI binding type exposes no structured error shape, only
+`Error.message` text): a documented Cloudflare HTTP-equivalent or
+internal code found in the message (`429`, `500`, `502`, `503`, `504`,
+`408`, `3036`, `3040`) classifies as `TransientUpstreamError(service:
+"workers-ai")`; a documented client-error code (`400`, `401`, `403`,
+`404`, `422`) or any unrecognized failure shape classifies as
+`PermanentUpstreamError` — fail-closed, never guessed retryable. An
+`AbortError`/`TimeoutError` from the timeout itself is always transient.
+The public error message is a fixed string, never the caught error's own
+`.message` — `test/infrastructure/workers-ai/client.test.ts` asserts an
+identifiable synthetic detail never reaches `publicMessage`.
+
+**Structured output validation** (`src/infrastructure/workers-ai/translate.ts`)
+mirrors the existing OpenAI adapter's defense-in-depth manual validation:
+the chat-completions-shaped response's `choices[0].message.content` is
+JSON-parsed, checked against the same structural/cross-field rules as
+`translation-v2.ts`'s schema (detected-language/action/targetLanguage
+consistency, non-empty `translatedText` on a translate action, a valid
+`styleSignals` tone/emojiUsage pair, and — new for this adapter — that
+`needsEscalation`/`escalationReason` agree: `escalationReason` is
+`"none"` if and only if `needsEscalation` is `false`, and any other value
+must be one of the six fixed `EscalationReason` enum members). No `any`,
+no `as unknown as X` — see `test/infrastructure/workers-ai/translate.test.ts`.
+
+**Shared prompt content.** `src/prompts/translation-shared.ts` extracts
+the provider-neutral instructional text and user-content-line building
+logic verbatim from the pre-existing OpenAI prompt, reused byte-identically
+by both `translation-v2.ts` (OpenAI) and the new
+`translation-workers-ai.ts` (Workers AI) — a semantic-parity test asserts
+identical output for identical input. `translation-workers-ai.ts` adds
+its own JSON Schema (`WORKERS_AI_JSON_SCHEMA`), extending the v1 schema
+with `needsEscalation`/`escalationReason`, and its own prompt version
+constant (`TRANSLATION_WORKERS_AI_PROMPT_VERSION`), independent of the
+OpenAI prompt's versioning.
+
+### Webhook integration
+
+`src/handlers/telegram-webhook.ts`'s provider-conditional branch moves
+the existing `reserveOpenAiAttempt` closure and the `OPENAI_API_KEY`
+presence check entirely inside the `openai`-mode branch — `workers-ai`
+mode never requires `OPENAI_API_KEY` and never consumes the Phase 7
+OpenAI-specific `rate_limit_counters`/`openai_daily_usage` counters (it
+is still subject to the provider-agnostic per-chat handled-update limit,
+same as any other message). A new `catch (error instanceof
+EscalationRequiredError)` branch responds 200, outcome
+`ignored:escalation-unavailable`, and **keeps** the dedupe reservation
+(this is a safe, expected outcome, not a transient failure — a
+redelivery of the same update would reach the same escalation-required
+result again, so releasing the reservation would gain nothing). Dedupe
+and speaker-memory read/write ordering are otherwise unchanged from
+Phase 4–7 regardless of provider. Relevant structured log lines include
+`provider: config.translationProvider` — never any other provider
+-identifying detail (see `docs/security-and-privacy.md`, "Log
+minimization").
 
 ## What this Worker does _not_ do (see `docs/implementation-plan.md`)
 

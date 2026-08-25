@@ -18,11 +18,22 @@
   // docs/security-and-privacy.md. Secrets never go here.
   "vars": {
     "ENVIRONMENT": "development",
-    // Fixed model choice — see docs/decisions and docs/architecture.md.
+    // Phase 9.1A: which translation provider the router uses for the
+    // ordinary-text translation path — see
+    // docs/decisions/0002-multi-provider-translation-routing.md and
+    // src/infrastructure/translation/router.ts. "workers-ai" is the
+    // routine (no-OpenAI-spend) path; "openai" is the retained,
+    // disabled-by-default-in-intent legacy/compatibility path.
+    "TRANSLATION_PROVIDER": "workers-ai",
+    // Non-secret model identifier for the Workers AI routine provider.
+    // An operational choice, not a domain constant — see
+    // docs/phase9-provider-plan.md and docs/architecture.md.
+    "WORKERS_AI_MODEL": "@cf/zai-org/glm-4.7-flash",
+    // Retained only for TRANSLATION_PROVIDER=openai (legacy/compat path).
     "OPENAI_MODEL": "gpt-4o-mini",
     // Telegram's own text message limit is 4096 UTF-16 code units; this
     // is a deliberately lower product ceiling (short family-chat
-    // messages) to bound OpenAI cost/latency per message. Tune freely —
+    // messages) to bound provider cost/latency per message. Tune freely —
     // it's read at request time, not baked into any schema.
     "MAX_TRANSLATABLE_MESSAGE_LENGTH": "2000",
     // Phase 7 reliability/cost limits — see src/config/reliability-config.ts
@@ -45,4 +56,13 @@
       "migrations_dir": "migrations",
     },
   ],
+  // Phase 9.1A: Workers AI binding for the routine translation provider —
+  // see src/infrastructure/workers-ai/. Automated tests never perform a
+  // real env.AI.run() call (see test doubles in test/infrastructure/workers-ai/);
+  // local `wrangler dev` inference can consume real account usage per
+  // Cloudflare's documentation, so this binding is not exercised live by
+  // `npm run check`.
+  "ai": {
+    "binding": "AI",
+  },
 }

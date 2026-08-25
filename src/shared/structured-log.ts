@@ -1,4 +1,4 @@
-import type { UpstreamService } from "./errors";
+import type { EscalationReason, UpstreamService } from "./errors";
 
 /**
  * Phase 7 structured logging: a strict field allowlist, one JSON line per
@@ -20,6 +20,9 @@ import type { UpstreamService } from "./errors";
 
 export type LogLimitType = "chat-updates" | "chat-openai" | "openai-daily";
 
+/** Phase 9.1A: which translation provider handled (or was selected for) this request — a fixed enum, never a model ID or wire-format detail. */
+export type LogProvider = "workers-ai" | "openai";
+
 export interface LogFields {
   readonly event: string;
   readonly outcome?: string;
@@ -32,6 +35,9 @@ export interface LogFields {
   readonly limitType?: LogLimitType;
   readonly attempt?: number;
   readonly retryCount?: number;
+  readonly provider?: LogProvider;
+  /** Only ever a fixed enum reason (see EscalationReason) — never the model's own explanation text. */
+  readonly escalationReason?: EscalationReason;
 }
 
 export type LogSink = (line: string) => void;

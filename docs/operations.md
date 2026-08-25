@@ -168,6 +168,19 @@ CLI arguments can end up in shell history. Command templates below use
 `<PLACEHOLDER>` only; no real value is ever written to this document, a
 commit, or a terminal transcript kept anywhere in this repository.
 
+### Phase 9.1A note: `AI` binding requires no Secret
+
+`TRANSLATION_PROVIDER=workers-ai` mode (the code's default as of Phase
+9.1A, implemented and tested locally/in CI only — not yet deployed) uses
+the `AI` Worker binding (`wrangler.jsonc`), which needs no
+`wrangler secret put` call and no API key — Workers AI billing/quota is
+tied to the Cloudflare account itself, not a registered credential.
+`OPENAI_API_KEY` (unit B below) remains required only if/when the
+deployed Worker is configured with `TRANSLATION_PROVIDER=openai`
+(legacy/compatibility mode). Deploying the Phase 9.1A code itself is a
+separate, not-yet-approved external action — see `README.md`,
+"Deployment state".
+
 ### `OPENAI_API_KEY` (unit B)
 
 - **Source:** OpenAI Platform (`https://platform.openai.com/api-keys`) —

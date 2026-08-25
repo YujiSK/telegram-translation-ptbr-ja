@@ -43,14 +43,23 @@ function buildUpdate(
   };
 }
 
-function testEnv(overrides: Partial<Env> = {}): Env {
+interface TestEnvOverrides {
+  readonly TELEGRAM_WEBHOOK_SECRET?: string;
+  readonly OPENAI_API_KEY?: string;
+  readonly TELEGRAM_BOT_TOKEN?: string;
+  readonly TRANSLATION_PROVIDER?: string;
+}
+
+/** Phase 9.1A: this file's security regression tests mock only the OpenAI fetch endpoint — force the legacy `TRANSLATION_PROVIDER: "openai"` path by default so `wrangler.jsonc`'s new `workers-ai` default doesn't change this file's behavior. */
+function testEnv(overrides: TestEnvOverrides = {}): Env {
   return {
     ...env,
     TELEGRAM_WEBHOOK_SECRET: WEBHOOK_SECRET,
     OPENAI_API_KEY,
     TELEGRAM_BOT_TOKEN,
+    TRANSLATION_PROVIDER: "openai",
     ...overrides,
-  };
+  } as Env;
 }
 
 function webhookRequest(body: unknown): Request {

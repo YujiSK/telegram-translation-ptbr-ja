@@ -62,17 +62,20 @@ interface ReliabilityTestEnvOverrides {
   readonly TELEGRAM_WEBHOOK_SECRET?: string;
   readonly OPENAI_API_KEY?: string;
   readonly TELEGRAM_BOT_TOKEN?: string;
+  readonly TRANSLATION_PROVIDER?: string;
   readonly MAX_HANDLED_UPDATES_PER_CHAT_PER_MINUTE?: string;
   readonly MAX_OPENAI_ATTEMPTS_PER_CHAT_PER_MINUTE?: string;
   readonly MAX_OPENAI_ATTEMPTS_PER_DAY?: string;
 }
 
+/** Phase 9.1A: this file's Phase 7 rate/usage-limit tests all mock only the OpenAI fetch endpoint — force the legacy `TRANSLATION_PROVIDER: "openai"` path by default so `wrangler.jsonc`'s new `workers-ai` default doesn't change this file's behavior. */
 function testEnv(overrides: ReliabilityTestEnvOverrides = {}): Env {
   return {
     ...env,
     TELEGRAM_WEBHOOK_SECRET: WEBHOOK_SECRET,
     OPENAI_API_KEY,
     TELEGRAM_BOT_TOKEN,
+    TRANSLATION_PROVIDER: "openai",
     ...overrides,
   } as Env;
 }

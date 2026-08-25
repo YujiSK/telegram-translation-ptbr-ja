@@ -1,8 +1,12 @@
 # Implementation Plan
 
 **Current phase: Phase 7 completed; Phase 8A (deployment preparation)
-completed — every external action deferred to Phase 8B, pending its own
-separate approval; Phase 8 as a whole is not Completed. Phase 9 not
+completed; Phase 8B (external actions) completed — the Worker, remote D1
+migrations, production Secrets, admin/chat bootstrap, and Telegram
+webhook are live. Phase 9 (pilot) started and is currently paused for the
+Phase 9.1 provider redesign. Phase 9.1A (provider abstraction + Workers
+AI routine path) is completed — implemented and tested locally/in CI
+only, not deployed. Phase 9.1B (Gemini escalation) and DeepL are not
 started.** OpenAI
 translation local implementation: Completed. Structured Outputs mock
 tests: Completed. Telegram reply orchestration mock tests: Completed.
@@ -563,6 +567,87 @@ registration — every runbook command in `docs/operations.md` uses only
   real Telegram webhook registration — all Phase 8B, all requiring
   Yuji's explicit go-ahead per action, granted separately from this
   plan.
+
+---
+
+## Phase 9.1A — Provider abstraction + Workers AI routine path
+
+**Status: completed.** Implemented as
+`src/infrastructure/translation/{provider.ts,router.ts}` (a
+vendor-independent `TranslationProvider` interface,
+`ProviderTranslationCandidate` with a fixed-enum `EscalationReason`, and
+`createTranslationRouter` — the sole place a `ProviderTranslationCandidate`
+is converted into the existing `TranslationOutcome` contract or an
+`EscalationRequiredError`), `src/infrastructure/workers-ai/{client.ts,translate.ts}`
+(the Workers AI adapter: `env.AI.run()` via a narrow `WorkersAiBinding`
+interface, `AbortSignal`-based timeout, best-effort Cloudflare-documented
+error-code classification, manual structured-output validation mirroring
+the OpenAI adapter's defense-in-depth style), and
+`src/prompts/{translation-shared.ts,translation-workers-ai.ts}` (shared
+prompt content extracted from the existing OpenAI prompt, reused
+byte-identically, plus a Workers AI-specific JSON Schema and prompt
+version). `TRANSLATION_PROVIDER` (`workers-ai` | `openai`, new) and
+`WORKERS_AI_MODEL` (new, `@cf/zai-org/glm-4.7-flash`) are non-secret
+`wrangler.jsonc` vars validated by a rewritten discriminated-union
+`validateAppConfig()`; `OPENAI_MODEL` is retained, required only in
+`openai` mode. The `AI` binding was added to `wrangler.jsonc` and
+`worker-configuration.d.ts` was regenerated via `npm run cf-typegen`.
+`src/handlers/telegram-webhook.ts` was rewired to build its
+`TranslateBoundary` from `createTranslationRouter`, moving the existing
+`reserveOpenAiAttempt`/`OPENAI_API_KEY`-presence check entirely inside
+the `openai`-mode branch (so `workers-ai` mode requires neither), and
+gained a `catch (error instanceof EscalationRequiredError)` branch (200,
+`ignored:escalation-unavailable`, dedupe reservation kept). See
+`docs/architecture.md`, "Translation provider router (Phase 9.1A)", for
+the full design and `docs/phase9-provider-plan.md`, "Phase 9.1A
+implementation record", for how this maps to the original plan.
+
+**Explicitly not implemented, per this task's own scope:** Gemini 3.5
+Flash Lite escalation (Phase 9.1B) — an escalation-required Workers AI
+candidate surfaces as a safe "no reply" outcome, not a Gemini call, since
+no escalation target exists yet. DeepL is likewise not implemented.
+**No production deployment happened as part of this phase** — no
+`wrangler deploy`, no `wrangler secret put`, no remote D1 migration
+(none was needed — Workers AI mode reuses only the existing
+provider-agnostic per-chat handled-update limit, not any OpenAI-specific
+counter table), and no real `env.AI.run()`, OpenAI, or Telegram API call.
+Every test in `test/infrastructure/workers-ai/`,
+`test/infrastructure/translation/`, `test/prompts/translation-workers-ai.test.ts`,
+and `test/handlers/telegram-webhook-workers-ai.test.ts` injects a fake
+`WorkersAiBinding`; `vitest.config.ts`'s `remoteBindings: false` also
+prevents the test pool itself from attempting a live Cloudflare
+connection for the `AI` binding.
+
+- **目的:** Replace the OpenAI-only routine translation path with a
+  vendor-independent provider router and a Cloudflare Workers AI routine
+  adapter, while keeping OpenAI available as an explicit, non-default
+  legacy/compatibility mode — with no automatic fallback between
+  providers and no Gemini/DeepL implementation in this slice.
+- **実装内容:** See "Status: completed" above for the full file list.
+- **前提条件:** Phase 8 (8A + 8B) complete; the Phase 9 pilot already
+  identified the OpenAI-only path as unsuitable for routine traffic (see
+  `docs/checkpoints/2026-08-25-phase8b-live-provider-redesign.md`).
+- **完了条件:** `npm run check` green (all prior-phase tests unchanged
+  and passing, plus the new provider-router/Workers-AI/config/webhook
+  test suites); no `any`, no `as unknown as X`; no new D1 migration; no
+  external side effect of any kind; CI green.
+- **テスト:** Unit tests for the router (both modes, escalation-required
+  case, no-fallback assertions), the Workers AI client (timeout, every
+  documented transient/permanent error code, non-leaking error message),
+  the Workers AI adapter (valid/invalid structured output, cross-field
+  consistency, escalation-reason enum, upstream-failure propagation), the
+  shared/Workers-AI prompt builders (including OpenAI-prompt semantic
+  parity), the rewritten config validator, and a webhook-integration
+  suite (`telegram-webhook-workers-ai.test.ts`) covering the full
+  request flow under `TRANSLATION_PROVIDER=workers-ai` — all against
+  mocked/fake bindings, never a real Workers AI/OpenAI/Telegram call.
+- **Yujiによる手動作業:** None required by this phase. Deploying this
+  code (switching the live Worker's `TRANSLATION_PROVIDER`), and any
+  Phase 9.1B (Gemini) or DeepL work, remain separate, separately-approved
+  future actions.
+- **次フェーズへ進む前の停止点:** Reached. Stop after CI is green — do
+  not proceed to Phase 9.1B (Gemini) or any external/production action
+  as part of this phase.
 
 ---
 

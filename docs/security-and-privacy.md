@@ -202,16 +202,21 @@ a future call site could accidentally widen.
 
 - Structured logs may include: `event`, `outcome`, `status`,
   `durationMs`, `updateId`, `chatId`, `errorClass`, `service`,
-  `limitType`, `attempt`, `retryCount`.
+  `limitType`, `attempt`, `retryCount`, and — **Phase 9.1A** — `provider`
+  (fixed enum `"workers-ai"` | `"openai"`) and `escalationReason` (fixed
+  6-value enum, e.g. `"ambiguous-context"`; never free text).
 - Structured logs must never include: message text (source or
   translated), reply-context text, full command text, correction
-  source/target terms, display names, full OpenAI prompts, raw
-  OpenAI/Telegram responses, Secret values, Authorization/header values,
+  source/target terms, display names, full OpenAI/Workers AI prompts, raw
+  OpenAI/Workers AI/Telegram responses, Secret values, Authorization/header values,
   API keys, bot tokens, the webhook secret, stack traces, or raw
-  `Error.message` text. `classifyError()` is the sanctioned way to turn a
-  caught error into log fields — it extracts only `error.name` (never
-  `.message`) and a type-guard-checked `service`, never an unchecked
-  cast.
+  `Error.message` text — including any model-generated explanation for an
+  escalation decision, which is discarded entirely; only the fixed
+  `escalationReason` enum value may be logged. `classifyError()` is the
+  sanctioned way to turn a caught error into log fields — it extracts
+  only `error.name` (never `.message`) and a type-guard-checked
+  `service` (now including `"workers-ai"`, Phase 9.1A), never an
+  unchecked cast.
 - `src/handlers/telegram-webhook.ts`'s `finish()` helper logs exactly one
   structured event per request (the single final outcome), not a
   multi-log-line-per-request pattern.
@@ -272,7 +277,20 @@ correction/preference belonging to a different `(chat_id, user_id)`.
 `src/application/execute-command.ts` has no OpenAI import and is never
 given an OpenAI boundary. Command text is parsed locally
 (`src/commands/parse-command.ts`) and never leaves the Worker as
-anything but a Telegram reply.
+anything but a Telegram reply. This holds regardless of
+`TRANSLATION_PROVIDER` — the command path never imports or calls the
+Workers AI adapter either (Phase 9.1A).
+
+## Data sent to Workers AI (Phase 9.1A)
+
+Identical scope and limits to "Data sent to OpenAI" above — the same
+current-message text, at most one reply-context message, and the same
+resolved speaker-memory hints/corrections, never more. Workers AI is
+called through the `AI` Worker binding (`env.AI.run()`), not an external
+HTTP API with its own key — the request stays within Cloudflare's
+platform rather than crossing to a third-party API boundary the way the
+OpenAI request does. No stored conversation history, Telegram IDs, bot
+tokens, or unrelated D1 rows are sent, matching the OpenAI path exactly.
 
 ## Command response policy
 
@@ -381,6 +399,14 @@ tests either way.
   that fails boundary validation) as a `PermanentUpstreamError`. See
   `docs/architecture.md`'s dedupe-and-retry section for what this means
   for a redelivered Telegram update.
+- **Implemented (Phase 9.1A):** `src/infrastructure/workers-ai/client.ts`
+  applies a real `AbortSignal`-based timeout to every `env.AI.run()`
+  call, with no automatic retry beyond the one logical Workers AI attempt
+  per Telegram delivery (unlike OpenAI's capped transient retry) — see
+  `docs/architecture.md`, "Workers AI adapter", for the full error
+  classification. This is a deliberate scope decision for this phase, not
+  an oversight: adding a Workers-AI-specific retry budget was left for a
+  later phase if operational data shows it's needed.
 - **Implemented (Phase 6):** every D1 call reachable from a command —
   reads and mutations alike — uses the same `runD1Query` classification,
   so a transient D1 outage during `/remember`, `/forget`, `/forgetme

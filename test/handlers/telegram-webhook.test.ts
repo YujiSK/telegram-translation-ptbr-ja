@@ -52,14 +52,33 @@ function buildUpdate(
   };
 }
 
-function testEnv(overrides: Partial<Env> = {}): Env {
+/**
+ * Phase 9.1A: `wrangler.jsonc`'s default `TRANSLATION_PROVIDER` is now
+ * `"workers-ai"`. This entire file predates the provider router and
+ * mocks only the OpenAI fetch endpoint, so every test here forces the
+ * legacy `TRANSLATION_PROVIDER: "openai"` path by default — preserving
+ * 100% of this file's existing behavior/assertions unchanged. The
+ * literal-vars-typed `Env` (see worker-configuration.d.ts) means the
+ * override value's type must be widened; `as Env` reflects that every
+ * `vars` entry is a plain string at runtime regardless of what
+ * TypeScript narrowed it to from the `wrangler.jsonc` default.
+ */
+interface TestEnvOverrides {
+  readonly TELEGRAM_WEBHOOK_SECRET?: string;
+  readonly OPENAI_API_KEY?: string;
+  readonly TELEGRAM_BOT_TOKEN?: string;
+  readonly TRANSLATION_PROVIDER?: string;
+}
+
+function testEnv(overrides: TestEnvOverrides = {}): Env {
   return {
     ...env,
     TELEGRAM_WEBHOOK_SECRET: WEBHOOK_SECRET,
     OPENAI_API_KEY,
     TELEGRAM_BOT_TOKEN,
+    TRANSLATION_PROVIDER: "openai",
     ...overrides,
-  };
+  } as Env;
 }
 
 function webhookRequest(body: unknown, secretHeader?: string | null): Request {

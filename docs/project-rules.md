@@ -96,9 +96,10 @@ These names are the canonical binding names. `DB` is configured with the real
 remote `database_id`; local development still uses local D1 by default. Remote
 migrations and deployment require separate explicit approval.
 
-| Binding | Purpose                                       |
-| ------- | --------------------------------------------- |
-| `DB`    | D1 database (speaker memory, allowlist, etc.) |
+| Binding | Purpose                                              |
+| ------- | ---------------------------------------------------- |
+| `DB`    | D1 database (speaker memory, allowlist, etc.)        |
+| `AI`    | Workers AI (Phase 9.1A routine translation provider) |
 
 ## Generated files
 

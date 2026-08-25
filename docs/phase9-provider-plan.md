@@ -1,8 +1,48 @@
 # Phase 9.1 — Multi-provider translation plan
 
-Status: **Accepted design; implementation not started.**
+Status: **Phase 9.1A (provider abstraction + Workers AI routine path)
+implemented and tested locally/in CI — not deployed. Gemini escalation
+(Phase 9.1B) and DeepL remain accepted design, not started.**
 
 This file is the current working plan for the provider transition discovered during the first live Phase 9 pilot. If an older document still says Phase 8B is pending or that the Worker/webhook is not deployed, the 2026-08-25 checkpoint and this plan are the newer operational record.
+
+## Phase 9.1A implementation record
+
+**Implemented (this task):** `src/infrastructure/translation/{provider.ts,router.ts}`
+(`createTranslationRouter`, `TranslationProvider`,
+`ProviderTranslationCandidate` with a fixed-enum `EscalationReason` — no
+floating-point confidence score), `src/infrastructure/workers-ai/{client.ts,translate.ts}`
+(the Workers AI adapter, calling `env.AI.run()` via the narrow
+`WorkersAiBinding` interface, with `AbortSignal`-based timeout and
+best-effort Cloudflare-documented error-code classification), and
+`src/prompts/{translation-shared.ts,translation-workers-ai.ts}` (shared
+prompt content with the existing OpenAI prompt, plus the Workers AI JSON
+Schema extending the v1 schema with `needsEscalation`/`escalationReason`).
+`TRANSLATION_PROVIDER` (`workers-ai` | `openai`) and `WORKERS_AI_MODEL`
+are new non-secret `wrangler.jsonc` vars; `OPENAI_MODEL` is retained,
+required only in `openai` mode. `workers-ai` is now the default and the
+live production Worker's config target once deployed, but **no deploy
+happened as part of this task** — see `README.md`, "Deployment state".
+
+**Explicitly not implemented by this task, per its own scope:** Gemini
+3.5 Flash Lite escalation (Phase 9.1B), DeepL, and any production
+deployment of this code. When `needsEscalation` is true, the router
+throws `EscalationRequiredError` (200, outcome
+`ignored:escalation-unavailable`, dedupe reservation kept, no reply) —
+there is no escalation target to call yet. `TranslationRouterMode` calls
+exactly one provider per message; there is no automatic Workers AI →
+OpenAI fallback, satisfying the "bounded fan-out" rule below without
+Gemini existing yet.
+
+**Test/mock discipline:** every automated test (`test/infrastructure/workers-ai/`,
+`test/infrastructure/translation/`, `test/prompts/translation-workers-ai.test.ts`,
+`test/handlers/telegram-webhook-workers-ai.test.ts`) injects a fake
+`WorkersAiBinding` — `npm run check` never performs a real `env.AI.run()`
+call. `vitest.config.ts` sets `remoteBindings: false` so the test pool
+itself never attempts a live Cloudflare connection for the `AI` binding
+either. A real local-dev Workers AI inference (`npm run dev`, manual use)
+may consume real free-allocation quota; this is a known, accepted
+operational cost of local development, not something CI incurs.
 
 ## Goal
 
@@ -95,17 +135,26 @@ Preserve the existing vendor-independent concepts:
 
 Add provider adapters and a router rather than teaching application code about Workers AI, Gemini, DeepL, or OpenAI wire formats.
 
-Possible infrastructure-only result from the routine provider:
+**Implemented shape (Phase 9.1A)**, in
+`src/infrastructure/translation/provider.ts` — infrastructure-only, never
+imported by `domain/` or `application/`:
 
 ```ts
-interface ProviderCandidate {
+interface ProviderTranslationCandidate {
   outcome: TranslationOutcome;
-  confidence: number;
   needsEscalation: boolean;
+  escalationReason: EscalationReason; // fixed enum, "none" when needsEscalation is false
 }
 ```
 
-This is a planning shape, not a required public domain type. Confidence/escalation metadata should stay inside routing infrastructure unless a domain-level need is demonstrated.
+This differs from the original planning shape above in one deliberate
+way: there is no floating-point `confidence` field. The model reports a
+boolean `needsEscalation` plus a fixed-enum `escalationReason` directly
+(part of the same structured-output contract as the translation itself),
+rather than a numeric score the router would have to threshold — this
+avoids inventing an arbitrary confidence cutoff and keeps the value
+easy to log safely (an enum, never a raw number derived from unvalidated
+model output).
 
 ## Bounded fan-out policy
 
@@ -167,10 +216,10 @@ Each external mutation/credential registration remains separately approved.
 
 ## Implementation sequence
 
-1. Refactor translation-provider interface/router with the existing OpenAI adapter still passing tests.
-2. Add Workers AI adapter and structured validation.
-3. Add bounded escalation metadata/policy.
-4. Add Gemini 3.5 Flash Lite adapter.
+1. ~~Refactor translation-provider interface/router with the existing OpenAI adapter still passing tests.~~ **Done (Phase 9.1A).**
+2. ~~Add Workers AI adapter and structured validation.~~ **Done (Phase 9.1A).**
+3. ~~Add bounded escalation metadata/policy.~~ **Done (Phase 9.1A) — escalation is detected and routed to `EscalationRequiredError`; no escalation target exists yet (step 4 below).**
+4. Add Gemini 3.5 Flash Lite adapter. **Not started (Phase 9.1B).**
 5. Generalize provider usage/rate accounting and structured logs.
 6. Add provider-routing tests covering routine, escalation, transient failure, permanent malformed response, and no-fan-out behavior.
 7. Review privacy/security changes.

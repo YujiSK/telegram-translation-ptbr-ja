@@ -2,7 +2,7 @@ import { validateAppConfig } from "../config/app-config";
 import { validateReliabilityConfig } from "../config/reliability-config";
 import { parseCommandMessage } from "../commands/parse-command";
 import { executeCommand } from "../application/execute-command";
-import { translateAndReply } from "../application/translate-and-reply";
+import { translateAndReply, type TranslateBoundary } from "../application/translate-and-reply";
 import {
   resolveEffectiveSpeakerMemory,
   selectApplicableCorrections,
@@ -33,9 +33,12 @@ import {
 } from "../infrastructure/d1/translation-corrections";
 import { sendMessage } from "../infrastructure/telegram/send-message";
 import { translateMessage } from "../infrastructure/openai/translate";
+import { createTranslationRouter } from "../infrastructure/translation/router";
+import { createWorkersAiTranslationProvider } from "../infrastructure/workers-ai/translate";
 import { parseTelegramUpdate } from "../infrastructure/telegram/parse-update";
 import { isWebhookSecretValid } from "../infrastructure/telegram/webhook-secret";
 import {
+  EscalationRequiredError,
   RateLimitExceededError,
   TransientUpstreamError,
   UsageLimitExceededError,
@@ -91,6 +94,7 @@ type WebhookOutcome =
   | "ignored:untargeted-language"
   | "ignored:rate-limited"
   | "ignored:usage-limit"
+  | "ignored:escalation-unavailable"
   | "command:handled"
   | "command:unknown"
   | "command:invalid"
@@ -419,9 +423,13 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     }
   }
 
-  // 11. Non-secret configuration must be valid before any OpenAI call.
+  // 11. Non-secret configuration must be valid before any provider call.
+  //     Phase 9.1A: which provider fields are required depends on
+  //     TRANSLATION_PROVIDER — see src/config/app-config.ts.
   const configResult = validateAppConfig({
     ENVIRONMENT: env.ENVIRONMENT,
+    TRANSLATION_PROVIDER: env.TRANSLATION_PROVIDER,
+    WORKERS_AI_MODEL: env.WORKERS_AI_MODEL,
     OPENAI_MODEL: env.OPENAI_MODEL,
     MAX_TRANSLATABLE_MESSAGE_LENGTH: env.MAX_TRANSLATABLE_MESSAGE_LENGTH,
   });
@@ -449,16 +457,11 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     });
   }
 
-  const openaiApiKey = env.OPENAI_API_KEY;
   const telegramBotToken = env.TELEGRAM_BOT_TOKEN;
-  if (
-    openaiApiKey === undefined ||
-    openaiApiKey === "" ||
-    telegramBotToken === undefined ||
-    telegramBotToken === ""
-  ) {
-    // Secrets aren't registered yet (expected before Phase 8) — fail safe,
-    // and don't release: this won't succeed on a bare redelivery either.
+  if (telegramBotToken === undefined || telegramBotToken === "") {
+    // Secret isn't registered yet — fail safe, and don't release: this
+    // won't succeed on a bare redelivery either. Required regardless of
+    // translation provider, since both reply via Telegram.
     return finish(internalError(), startedAt, {
       event: "telegram_webhook",
       outcome: "internal_error",
@@ -467,38 +470,80 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     });
   }
 
-  // Phase 7: reserves one unit of OpenAI attempt budget immediately
-  // before *each* HTTP attempt (including retries) — chat-minute burst
-  // first, then the global daily ceiling, never the other way around
-  // (docs/architecture.md, "Rate limiting and usage ceiling placement").
-  // Captured as a closure so infrastructure/openai never imports D1.
-  const reserveOpenAiAttempt = async (): Promise<void> => {
-    const nowMs = Date.now();
-    const chatAllowed = await consumeChatOpenAiAttemptLimit(
-      env.DB,
-      update.chatId,
-      minuteWindowId(nowMs),
-      reliabilityConfig.maxOpenAiAttemptsPerChatPerMinute,
-    );
-    if (!chatAllowed) {
-      throw new RateLimitExceededError("OpenAI per-chat attempt burst limit exceeded");
+  // Phase 9.1A: build the single-provider TranslateBoundary the router
+  // selects, based on TRANSLATION_PROVIDER — never both, never a
+  // runtime fan-out (docs/architecture.md, "Translation provider
+  // router"). Workers AI mode needs no Secret at all (env.AI is a
+  // binding, not a Secret) and never consumes the Phase 7
+  // OpenAI-specific rate/usage counters below.
+  let translateBoundary: TranslateBoundary;
+  if (config.translationProvider === "workers-ai") {
+    translateBoundary = createTranslationRouter({
+      mode: "workers-ai",
+      workersAi: createWorkersAiTranslationProvider({
+        binding: env.AI,
+        model: config.workersAiModel,
+      }),
+    });
+  } else {
+    const openaiApiKey = env.OPENAI_API_KEY;
+    if (openaiApiKey === undefined || openaiApiKey === "") {
+      // Secret isn't registered yet — only required for the legacy
+      // TRANSLATION_PROVIDER=openai path.
+      return finish(internalError(), startedAt, {
+        event: "telegram_webhook",
+        outcome: "internal_error",
+        updateId: update.updateId,
+        chatId: update.chatId,
+      });
     }
-    const dailyAllowed = await consumeDailyOpenAiAttemptLimit(
-      env.DB,
-      utcDayId(nowMs),
-      reliabilityConfig.maxOpenAiAttemptsPerDay,
-    );
-    if (!dailyAllowed) {
-      throw new UsageLimitExceededError("Global daily OpenAI attempt ceiling exceeded");
-    }
-  };
+
+    // Phase 7: reserves one unit of OpenAI attempt budget immediately
+    // before *each* HTTP attempt (including retries) — chat-minute
+    // burst first, then the global daily ceiling, never the other way
+    // around (docs/architecture.md, "Rate limiting and usage ceiling
+    // placement"). Captured as a closure so infrastructure/openai never
+    // imports D1. Legacy-openai-mode only — Workers AI mode never
+    // reaches this branch.
+    const reserveOpenAiAttempt = async (): Promise<void> => {
+      const nowMs = Date.now();
+      const chatAllowed = await consumeChatOpenAiAttemptLimit(
+        env.DB,
+        update.chatId,
+        minuteWindowId(nowMs),
+        reliabilityConfig.maxOpenAiAttemptsPerChatPerMinute,
+      );
+      if (!chatAllowed) {
+        throw new RateLimitExceededError("OpenAI per-chat attempt burst limit exceeded");
+      }
+      const dailyAllowed = await consumeDailyOpenAiAttemptLimit(
+        env.DB,
+        utcDayId(nowMs),
+        reliabilityConfig.maxOpenAiAttemptsPerDay,
+      );
+      if (!dailyAllowed) {
+        throw new UsageLimitExceededError("Global daily OpenAI attempt ceiling exceeded");
+      }
+    };
+
+    translateBoundary = createTranslationRouter({
+      mode: "openai",
+      openai: {
+        translate: (translationRequest) =>
+          translateMessage(translationRequest, {
+            apiKey: openaiApiKey,
+            model: config.openaiModel,
+            beforeAttempt: reserveOpenAiAttempt,
+          }),
+      },
+    });
+  }
 
   try {
     // 13-16. The application use case: read speaker memory, at most one
-    //        logical OpenAI call (each HTTP attempt budget-gated by
-    //        reserveOpenAiAttempt above), then (only on a translated
-    //        outcome) one Telegram reply and a best-effort
-    //        observed-profile write.
+    //        logical provider call via the router built above, then
+    //        (only on a translated outcome) one Telegram reply and a
+    //        best-effort observed-profile write.
     const outcome = await translateAndReply(update, {
       memoryReader: {
         readMemory: async ({ chatId, userId, sourceText }) => {
@@ -519,14 +564,7 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
           });
         },
       },
-      translate: {
-        translate: (translationRequest) =>
-          translateMessage(translationRequest, {
-            apiKey: openaiApiKey,
-            model: config.openaiModel,
-            beforeAttempt: reserveOpenAiAttempt,
-          }),
-      },
+      translate: translateBoundary,
       reply: {
         sendMessage: (params) => sendMessage(params, { botToken: telegramBotToken }),
       },
@@ -550,8 +588,22 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
       outcome: webhookOutcome,
       updateId: update.updateId,
       chatId: update.chatId,
+      provider: config.translationProvider,
     });
   } catch (error) {
+    if (error instanceof EscalationRequiredError) {
+      // Dedupe reservation KEPT — retrying the identical message would
+      // just re-derive the same escalation decision (Gemini escalation
+      // is Phase 9.1B, not available yet). See src/shared/errors.ts.
+      return finish(accepted("ignored:escalation-unavailable"), startedAt, {
+        event: "telegram_webhook",
+        outcome: "ignored:escalation-unavailable",
+        updateId: update.updateId,
+        chatId: update.chatId,
+        provider: config.translationProvider,
+        escalationReason: error.escalationReason,
+      });
+    }
     if (error instanceof RateLimitExceededError) {
       // Dedupe reservation KEPT — same reasoning as the inbound limit above.
       return finish(accepted("ignored:rate-limited"), startedAt, {
@@ -560,6 +612,7 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
         updateId: update.updateId,
         chatId: update.chatId,
         limitType: "chat-openai",
+        provider: config.translationProvider,
       });
     }
     if (error instanceof UsageLimitExceededError) {
@@ -570,6 +623,7 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
         updateId: update.updateId,
         chatId: update.chatId,
         limitType: "openai-daily",
+        provider: config.translationProvider,
       });
     }
     if (error instanceof TransientUpstreamError) {
@@ -577,12 +631,13 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     }
     // Permanent failures leave the dedupe row in place on purpose: a
     // Telegram redelivery will then be classified as ignored:duplicate
-    // instead of repeating the same doomed OpenAI/Telegram call forever.
+    // instead of repeating the same doomed provider/Telegram call forever.
     return finish(internalError(), startedAt, {
       event: "telegram_webhook",
       outcome: "internal_error",
       updateId: update.updateId,
       chatId: update.chatId,
+      provider: config.translationProvider,
       ...classifyError(error),
     });
   }
