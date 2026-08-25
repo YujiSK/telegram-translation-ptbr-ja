@@ -118,16 +118,16 @@ npm run dev
 
 Useful scripts:
 
-| Script | Purpose |
-| --- | --- |
-| `npm run dev` | Local Worker with Wrangler |
-| `npm run deploy` | Deploy Worker |
-| `npm run test` | Vitest in Workers runtime |
-| `npm run typecheck` | TypeScript check |
-| `npm run lint` | ESLint |
-| `npm run format:check` | Prettier check |
-| `npm run check` | format + lint + typecheck + tests |
-| `npm run cf-typegen` | Regenerate Worker binding types |
+| Script                 | Purpose                           |
+| ---------------------- | --------------------------------- |
+| `npm run dev`          | Local Worker with Wrangler        |
+| `npm run deploy`       | Deploy Worker                     |
+| `npm run test`         | Vitest in Workers runtime         |
+| `npm run typecheck`    | TypeScript check                  |
+| `npm run lint`         | ESLint                            |
+| `npm run format:check` | Prettier check                    |
+| `npm run check`        | format + lint + typecheck + tests |
+| `npm run cf-typegen`   | Regenerate Worker binding types   |
 
 ## Current production Secret names
 
