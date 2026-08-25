@@ -28,7 +28,10 @@ function chatCompletionResponse(payload: unknown): unknown {
 }
 
 function providerWithResponse(response: unknown) {
-  const run = vi.fn(() => Promise.resolve(response));
+  const run = vi.fn(
+    (_model: string, _inputs: Record<string, unknown>, _options?: { signal?: AbortSignal }) =>
+      Promise.resolve(response),
+  );
   const binding: WorkersAiBinding = { run };
   const provider = createWorkersAiTranslationProvider({
     binding,
@@ -66,6 +69,95 @@ const VALID_SKIP_PAYLOAD = {
   needsEscalation: false,
   escalationReason: "none",
 };
+
+/**
+ * Phase 9.1A review hardening: proves, at runtime, that the request this
+ * module actually sends matches the direct-binding contract confirmed by
+ * reading this repo's generated `worker-configuration.d.ts`
+ * (`ResponseFormatJSONSchema`, part of `ChatCompletionsCommonOptions.response_format`)
+ * — the schema nested one level under `json_schema`, never the OpenAI
+ * Responses-API wrapper shape (`{ name, schema, strict }` at the top
+ * level of `response_format`). `src/infrastructure/workers-ai/translate.ts`
+ * also type-checks this shape at compile time via an explicit
+ * `ResponseFormatJSONSchema` annotation — this test is the runtime half
+ * of that same verification.
+ */
+describe("createWorkersAiTranslationProvider — direct-binding request contract", () => {
+  it("sends response_format as { type: 'json_schema', json_schema: { name, schema, strict } }, with no OpenAI-wrapper-shaped fields", async () => {
+    const { provider, run } = providerWithResponse(chatCompletionResponse(VALID_JA_PAYLOAD));
+
+    await provider.translate(request("こんにちは"));
+
+    expect(run).toHaveBeenCalledTimes(1);
+    const inputs = run.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(Object.keys(inputs).sort()).toEqual(["messages", "response_format"]);
+
+    const responseFormat = inputs.response_format as Record<string, unknown>;
+    expect(responseFormat.type).toBe("json_schema");
+    expect(Object.keys(responseFormat).sort()).toEqual(["json_schema", "type"]);
+
+    const jsonSchema = responseFormat.json_schema as Record<string, unknown>;
+    expect(Object.keys(jsonSchema).sort()).toEqual(["name", "schema", "strict"]);
+    expect(jsonSchema.strict).toBe(true);
+    expect(typeof jsonSchema.name).toBe("string");
+  });
+
+  it("sends exactly a developer message followed by a user message, matching the generated ChatCompletionMessageParam contract", async () => {
+    const { provider, run } = providerWithResponse(chatCompletionResponse(VALID_JA_PAYLOAD));
+
+    await provider.translate(request("こんにちは"));
+
+    const inputs = run.mock.calls[0]?.[1] as { messages: { role: string; content: string }[] };
+    expect(inputs.messages).toHaveLength(2);
+    expect(inputs.messages[0]?.role).toBe("developer");
+    expect(inputs.messages[1]?.role).toBe("user");
+  });
+});
+
+/**
+ * Phase 9.1A review hardening: the fakes used throughout this file
+ * intentionally use a minimal envelope (`{ choices: [{ message: {
+ * content } }] }`). This test instead uses a full, realistic
+ * direct-binding envelope — matching the generated `ChatCompletionsOutput`
+ * shape (`id`, `object`, `created`, `model`, `choices`, `usage`) — to
+ * prove `extractAssistantContent` still finds `choices[0].message.content`
+ * when every other documented field is also present, not just when they
+ * happen to be absent.
+ */
+describe("createWorkersAiTranslationProvider — realistic full ChatCompletionsOutput envelope", () => {
+  it("extracts the content correctly from a complete envelope with id/object/created/model/usage present", async () => {
+    const fullEnvelope = {
+      id: "chatcmpl-synthetic-9f2a",
+      object: "chat.completion",
+      created: 1700000000,
+      model: "@cf/zai-org/glm-4.7-flash",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: JSON.stringify(VALID_JA_PAYLOAD),
+            refusal: null,
+          },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+      usage: { prompt_tokens: 42, completion_tokens: 17, total_tokens: 59 },
+    };
+    const { provider } = providerWithResponse(fullEnvelope);
+
+    const candidate = await provider.translate(request("こんにちは"));
+
+    expect(candidate.outcome).toEqual({
+      kind: "translated",
+      detectedLanguage: "ja",
+      targetLanguage: "pt-br",
+      translatedText: "mensagem sintética de teste",
+      styleSignals: { tone: "casual", emojiUsage: "none" },
+    });
+  });
+});
 
 describe("createWorkersAiTranslationProvider — JA to PT-BR", () => {
   it("returns a valid translated candidate with needsEscalation false", async () => {

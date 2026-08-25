@@ -277,6 +277,54 @@ describe("POST /telegram/webhook — workers-ai transient failure", () => {
   });
 });
 
+/**
+ * Phase 9.1A review hardening: the error classifier's default flipped
+ * from "unrecognized ⇒ permanent" to "unrecognized ⇒ transient" (see
+ * src/infrastructure/workers-ai/client.ts). These two tests are the
+ * webhook-level proof that the flip actually changes dedupe behavior end
+ * to end, and that a genuinely deterministic (config/request-shaped)
+ * failure still keeps the reservation as before. Neither case ever
+ * reaches OpenAI — `mockFetchDispatch({})` throws on any unexpected
+ * fetch call, so a stray OpenAI call would fail the test loudly.
+ */
+describe("POST /telegram/webhook — workers-ai call-layer failure classification (Phase 9.1A review hardening)", () => {
+  it("an unrecognized Workers AI call failure releases the dedupe reservation (transient by default)", async () => {
+    await allowlistChat();
+    const fetchSpy = mockFetchDispatch({});
+    const updateId = 980000021;
+
+    const response = await callWorker(
+      webhookRequest(buildUpdate({ updateId })),
+      testEnv({ AI: alwaysThrows(new Error("some completely unrecognized failure shape")) }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(false);
+  });
+
+  it("a known-permanent Workers AI config/request failure keeps the dedupe reservation", async () => {
+    await allowlistChat();
+    const fetchSpy = mockFetchDispatch({});
+    const updateId = 980000022;
+
+    const response = await callWorker(
+      webhookRequest(buildUpdate({ updateId })),
+      testEnv({ AI: alwaysThrows(new Error("invalid model: unknown model identifier")) }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(true);
+
+    const redelivery = await callWorker(
+      webhookRequest(buildUpdate({ updateId })),
+      testEnv({ AI: alwaysThrows(new Error("invalid model: unknown model identifier")) }),
+    );
+    await expect(redelivery.json()).resolves.toMatchObject({ outcome: "ignored:duplicate" });
+  });
+});
+
 describe("POST /telegram/webhook — workers-ai permanent (malformed) failure", () => {
   it("returns 500 and keeps the dedupe reservation, so a redelivery is a harmless duplicate", async () => {
     await allowlistChat();

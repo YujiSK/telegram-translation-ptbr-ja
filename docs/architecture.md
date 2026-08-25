@@ -757,16 +757,46 @@ attempt per Telegram delivery (matching `docs/project-rules.md` rules
 
 **Error classification** (`classifyWorkersAiError`, best-effort — the
 generated Workers AI binding type exposes no structured error shape, only
-`Error.message` text): a documented Cloudflare HTTP-equivalent or
-internal code found in the message (`429`, `500`, `502`, `503`, `504`,
-`408`, `3036`, `3040`) classifies as `TransientUpstreamError(service:
-"workers-ai")`; a documented client-error code (`400`, `401`, `403`,
-`404`, `422`) or any unrecognized failure shape classifies as
-`PermanentUpstreamError` — fail-closed, never guessed retryable. An
-`AbortError`/`TimeoutError` from the timeout itself is always transient.
-The public error message is a fixed string, never the caught error's own
-`.message` — `test/infrastructure/workers-ai/client.test.ts` asserts an
-identifiable synthetic detail never reaches `publicMessage`.
+`Error.message` text): a documented client-error code (`400`, `401`,
+`403`, `404`, `422`) or matching wording for the same deterministic
+problem (e.g. "invalid model", "unauthorized", "model not found")
+classifies as `PermanentUpstreamError(service: "workers-ai")` — a
+redelivery would fail identically, so keeping the dedupe reservation is
+correct. **Every other call-layer failure is transient** (Phase 9.1A
+review hardening): a documented transient code (`429`, `500`, `502`,
+`503`, `504`, `408`, `3036`, `3040`), common network/transport wording
+with no code attached (e.g. "network error", "service unavailable"), or
+a genuinely unrecognized failure shape (including a non-`Error` thrown
+value) all classify as `TransientUpstreamError`. This default was
+originally fail-closed-to-permanent; the review flipped it, since a
+wrongly-permanent classification permanently drops the message (the
+dedupe reservation is kept, so Telegram's redelivery is just a
+duplicate), while a wrongly-transient classification only costs one
+avoidable redelivery attempt — the safer default runs the other way than
+a boundary-input validator's. An `AbortError`/`TimeoutError` from the
+timeout itself is always transient. A **malformed but
+successfully-returned** model response is unaffected by any of this — it
+is a separate, still-permanent path (`translate.ts`'s `malformed()`
+helper, never routed through `classifyWorkersAiError`). The public error
+message is a fixed string, never the caught error's own `.message` —
+`test/infrastructure/workers-ai/client.test.ts` asserts an identifiable
+synthetic detail never reaches `publicMessage`.
+
+**Direct-binding contract verification (Phase 9.1A review hardening):**
+both the request shape (`response_format: { type: "json_schema",
+json_schema: { name, schema, strict } }`) and the response envelope
+(`choices[0].message.content`) were checked against this repo's actual
+generated `worker-configuration.d.ts` types
+(`Base_Ai_Cf_Zai_Org_Glm_4_7_Flash`'s `ChatCompletionsMessagesInput`/
+`ChatCompletionsOutput`) rather than assumed from OpenAI compatibility —
+confirmed to already match. The request's `response_format` value is now
+explicitly annotated with the generated `ResponseFormatJSONSchema` type
+in `translate.ts`, so `npm run typecheck` fails if this ever drifts;
+`test/infrastructure/workers-ai/translate.test.ts` adds a matching
+runtime assertion on the exact object sent to `binding.run()`. The
+message role `"developer"` was likewise confirmed (not assumed) against
+the generated `ChatCompletionMessageParam` type, which explicitly lists
+`DeveloperMessage` as a supported role for this model's direct binding.
 
 **Structured output validation** (`src/infrastructure/workers-ai/translate.ts`)
 mirrors the existing OpenAI adapter's defense-in-depth manual validation:

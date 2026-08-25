@@ -45,16 +45,27 @@ Not implemented by this task: Gemini escalation (Phase 9.1B), DeepL
 
 Provider roles:
 
-- **Cloudflare Workers AI (implemented, Phase 9.1A):** routine
-  translation/inference target, called via the `AI` Worker binding
-  (`env.AI.run()`), model `@cf/zai-org/glm-4.7-flash` set through the
-  `WORKERS_AI_MODEL` config var — never hard-coded. When the model
-  reports `needsEscalation: true`, the router throws
-  `EscalationRequiredError` (200, no reply, dedupe kept) rather than
-  calling any other provider. Local dev inference against the real
-  binding may consume real Workers AI free-allocation quota; every
-  automated test injects a fake binding instead, so `npm run check`
-  never performs a real `env.AI.run()` call.
+- **Cloudflare Workers AI (implemented, Phase 9.1A; review-hardened):**
+  routine translation/inference target, called via the `AI` Worker
+  binding (`env.AI.run()`), model `@cf/zai-org/glm-4.7-flash` set through
+  the `WORKERS_AI_MODEL` config var — never hard-coded. The
+  request/response contract (Structured Outputs JSON Schema shape,
+  `choices[0].message.content` envelope, the `"developer"` message role)
+  is checked against this repo's actual generated Cloudflare types
+  (`worker-configuration.d.ts`), not assumed from OpenAI compatibility —
+  aligned to the Cloudflare generated/direct-binding contract and covered
+  by automated tests; a live pilot against a real Workers AI call is
+  still pending a separately approved deployment. When the model reports
+  `needsEscalation: true`, the router throws `EscalationRequiredError`
+  (200, no reply, dedupe kept) rather than calling any other provider.
+  An ambiguous or unrecognized call-layer failure defaults to
+  transient/retryable rather than permanent, so a genuine transient
+  Workers AI blip never permanently drops a message — only a positively
+  identified deterministic (config/request) failure keeps the dedupe
+  reservation. Local dev inference against the real binding may consume
+  real Workers AI free-allocation quota; every automated test injects a
+  fake binding instead, so `npm run check` never performs a real
+  `env.AI.run()` call.
 - **Gemini 3.5 Flash Lite:** escalation target — **not implemented by
   this task; deferred to Phase 9.1B.** The project dashboard observed on
   2026-08-25 shows **15 RPM / 250K TPM / 500 RPD** on the free tier.

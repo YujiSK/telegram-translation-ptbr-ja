@@ -56,7 +56,20 @@ function malformed(reason: string): never {
   );
 }
 
-/** Finds the assistant's Structured Outputs JSON string in a validated Chat Completions envelope (`choices[0].message.content`). */
+/**
+ * Finds the assistant's Structured Outputs JSON string in a validated
+ * Chat Completions envelope (`choices[0].message.content`). Phase 9.1A
+ * review hardening: this envelope shape is verified against the
+ * generated `ChatCompletionsOutput`/`ChatCompletionChoice`/
+ * `ChatCompletionResponseMessage` types in `worker-configuration.d.ts` —
+ * `Base_Ai_Cf_Zai_Org_Glm_4_7_Flash.postProcessedOutputs` is
+ * `ChatCompletionsOutput`, whose `choices[number].message.content` is
+ * exactly this field. Still manually validated at runtime, not just
+ * type-asserted: Cloudflare's own Structured Outputs documentation does
+ * not guarantee schema (or envelope) compliance in every case, so this
+ * function treats the raw response as `unknown` regardless of what the
+ * generated type promises.
+ */
 function extractAssistantContent(envelope: Record<string, unknown>): string {
   const choices = envelope.choices;
   if (!isUnknownArray(choices) || choices.length === 0) {
@@ -267,17 +280,31 @@ async function translateWithWorkersAi(
     ...(request.memory !== undefined ? { memory: request.memory } : {}),
   });
 
-  const inputs: Record<string, unknown> = {
-    messages,
-    response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: WORKERS_AI_JSON_SCHEMA_NAME,
-        schema: WORKERS_AI_JSON_SCHEMA,
-        strict: true,
-      },
+  /**
+   * Phase 9.1A review hardening: verified against this repo's generated
+   * `worker-configuration.d.ts` (ambient global types, no import needed
+   * — see `ResponseFormatJSONSchema`, part of `ChatCompletionsCommonOptions.response_format`,
+   * which `Base_Ai_Cf_Zai_Org_Glm_4_7_Flash.inputs` — via `ChatCompletionsInput`
+   * = `ChatCompletionsMessagesInput` — includes). The direct-binding
+   * contract for a Chat-Completions-shaped model is
+   * `{ type: "json_schema", json_schema: { name, schema, strict } }` —
+   * the schema itself nested one level under `json_schema`, not the
+   * OpenAI Responses-API wrapper shape (`{ name, schema, strict }` at
+   * the top level of `response_format`, which this model's generated
+   * type does not accept). The explicit `ResponseFormatJSONSchema`
+   * annotation below makes this a type-checked claim: `npm run
+   * typecheck` fails if this ever drifts from the generated contract.
+   */
+  const responseFormat: ResponseFormatJSONSchema = {
+    type: "json_schema",
+    json_schema: {
+      name: WORKERS_AI_JSON_SCHEMA_NAME,
+      schema: WORKERS_AI_JSON_SCHEMA,
+      strict: true,
     },
   };
+
+  const inputs: Record<string, unknown> = { messages, response_format: responseFormat };
 
   const envelope = await callWorkersAiChat(inputs, options);
   if (!isRecord(envelope)) {

@@ -35,6 +35,18 @@ Respond using only the structured output format you have been given. Do not incl
 
 export type TranslationPromptDataWorkersAi = TranslationPromptDataShared;
 
+/**
+ * Phase 9.1A review hardening: `role: "developer"` is verified, not
+ * assumed OpenAI-compatible — this repo's generated
+ * `worker-configuration.d.ts` lists `DeveloperMessage` (`{ role:
+ * "developer", content, name? }`) as one of the six members of
+ * `ChatCompletionMessageParam`, the message type
+ * `Base_Ai_Cf_Zai_Org_Glm_4_7_Flash.inputs` (`ChatCompletionsMessagesInput.messages`)
+ * actually accepts for direct-binding calls to this model. Kept as
+ * `"developer"` rather than changed to `"system"` for this reason — see
+ * `test/prompts/translation-workers-ai.test.ts`, "role compatibility"
+ * for the regression test.
+ */
 export interface WorkersAiChatMessage {
   readonly role: "developer" | "user";
   readonly content: string;

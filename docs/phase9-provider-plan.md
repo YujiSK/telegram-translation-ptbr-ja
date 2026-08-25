@@ -1,8 +1,9 @@
 # Phase 9.1 — Multi-provider translation plan
 
 Status: **Phase 9.1A (provider abstraction + Workers AI routine path)
-implemented and tested locally/in CI — not deployed. Gemini escalation
-(Phase 9.1B) and DeepL remain accepted design, not started.**
+implemented and tested locally/in CI — not deployed; review-hardened
+(see "Phase 9.1A review hardening" below). Gemini escalation (Phase
+9.1B) and DeepL remain accepted design, not started.**
 
 This file is the current working plan for the provider transition discovered during the first live Phase 9 pilot. If an older document still says Phase 8B is pending or that the Worker/webhook is not deployed, the 2026-08-25 checkpoint and this plan are the newer operational record.
 
@@ -43,6 +44,50 @@ itself never attempts a live Cloudflare connection for the `AI` binding
 either. A real local-dev Workers AI inference (`npm run dev`, manual use)
 may consume real free-allocation quota; this is a known, accepted
 operational cost of local development, not something CI incurs.
+
+## Phase 9.1A review hardening
+
+A targeted review pass (separate task, same phase) checked the Workers
+AI adapter against this repo's actual generated Cloudflare types
+(`worker-configuration.d.ts`, `Base_Ai_Cf_Zai_Org_Glm_4_7_Flash` and its
+`ChatCompletionsMessagesInput`/`ChatCompletionsOutput` contract) rather
+than an OpenAI-compatibility assumption, and re-evaluated the Workers AI
+call-layer error-classification policy:
+
+- **Direct-binding request/response contract:** confirmed correct as
+  originally implemented — `response_format: { type: "json_schema",
+json_schema: { name, schema, strict } }` and a response envelope of
+  `choices[0].message.content` both match the generated
+  `ResponseFormatJSONSchema`/`ChatCompletionsOutput` types exactly. This
+  is now type-checked, not just manually verified: `src/infrastructure/workers-ai/translate.ts`
+  annotates the request's `response_format` value with the generated
+  `ResponseFormatJSONSchema` type, so `npm run typecheck` fails if the
+  contract ever drifts. See `docs/architecture.md`, "Workers AI adapter".
+- **Message role:** `"developer"` confirmed correct and kept — the
+  generated `ChatCompletionMessageParam` type explicitly lists
+  `DeveloperMessage` as a supported direct-binding role for this model,
+  so this was never an OpenAI-compatibility assumption. Documented with
+  a citing comment and a dedicated regression test in
+  `test/prompts/translation-workers-ai.test.ts`.
+- **Call-layer error classification (the actual behavior change):**
+  `classifyWorkersAiError` (`src/infrastructure/workers-ai/client.ts`)
+  used to default an unrecognized failure to permanent (fail closed).
+  That risked permanently dropping a message on a genuine transient
+  binding/network blip that didn't happen to mention a known HTTP-
+  equivalent code. The policy is now inverted: only a positively
+  identified deterministic signal (a documented permanent code, or
+  wording like "invalid model"/"unauthorized"/"model not found") is
+  permanent; every other call-layer failure — including a completely
+  unrecognized shape — is transient, so a Telegram redelivery can retry
+  it. A **malformed but successfully-returned** model response is a
+  separate, still-permanent code path (`translate.ts`'s `malformed()`
+  helper) and is unaffected by this change — validation failures are
+  never made retryable.
+- Live production validation of this contract still requires a
+  separately approved deployment — this hardening pass verified the
+  adapter against generated types and automated tests only, aligned to
+  Cloudflare's documented/generated direct-binding contract, not a real
+  Workers AI call.
 
 ## Goal
 

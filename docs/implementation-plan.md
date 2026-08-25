@@ -602,6 +602,22 @@ gained a `catch (error instanceof EscalationRequiredError)` branch (200,
 the full design and `docs/phase9-provider-plan.md`, "Phase 9.1A
 implementation record", for how this maps to the original plan.
 
+**Review hardening (post-completion, same phase):** a follow-up review
+pass verified the Workers AI adapter's request/response contract and
+message role against this repo's actual generated Cloudflare types
+(`worker-configuration.d.ts`) rather than an OpenAI-compatibility
+assumption — both confirmed already correct, and the request's
+`response_format` is now type-checked against the generated
+`ResponseFormatJSONSchema` type. The review also reworked
+`classifyWorkersAiError`'s unrecognized-failure default from permanent
+(fail-closed) to transient (prefer retryable), since the old default
+risked permanently dropping a message on a genuine transient
+binding/network blip — only a positively identified deterministic
+(config/request) signal is still classified permanent. `npm run check`
+green (692 tests, up from 671) and CI green. See
+`docs/phase9-provider-plan.md`, "Phase 9.1A review hardening", for the
+full breakdown.
+
 **Explicitly not implemented, per this task's own scope:** Gemini 3.5
 Flash Lite escalation (Phase 9.1B) — an escalation-required Workers AI
 candidate surfaces as a safe "no reply" outcome, not a Gemini call, since

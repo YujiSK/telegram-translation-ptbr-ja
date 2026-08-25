@@ -71,6 +71,31 @@ describe("callWorkersAiChat — documented transient signals", () => {
   );
 });
 
+/**
+ * Phase 9.1A review hardening: a real transient binding/network failure
+ * might arrive with no numeric status/code at all (Cloudflare's own error
+ * documentation doesn't guarantee one) — these cover the common wording
+ * for that case, still classified transient.
+ */
+describe("callWorkersAiChat — transient transport/network wording with no numeric code", () => {
+  it.each([
+    "network error",
+    "connection reset",
+    "service unavailable",
+    "internal error",
+    "socket hang up",
+    "fetch failed",
+    "ECONNRESET",
+    "ETIMEDOUT",
+  ])("classifies %j as transient", async (wording) => {
+    const run = vi.fn(() => Promise.reject(new Error(`synthetic: ${wording}`)));
+
+    await expect(
+      callWorkersAiChat({ messages: [] }, { binding: fakeBinding(run), model: "m" }),
+    ).rejects.toBeInstanceOf(TransientUpstreamError);
+  });
+});
+
 describe("callWorkersAiChat — documented permanent signals", () => {
   it.each(["400", "401", "403", "404", "422"])(
     "classifies an error mentioning %s as permanent",
@@ -83,23 +108,56 @@ describe("callWorkersAiChat — documented permanent signals", () => {
     },
   );
 
-  it("classifies an unrecognized failure shape as permanent (fail closed, never guessed retryable)", async () => {
+  /**
+   * Phase 9.1A review hardening: a deterministic/config/request problem
+   * might arrive with wording only, no numeric code — still permanent,
+   * since redelivery would fail identically every time.
+   */
+  it.each([
+    "invalid model specified",
+    "model not found",
+    "unauthorized: invalid credentials",
+    "authentication failed",
+    "request forbidden by policy",
+    "invalid request: missing field",
+    "unsupported model for this account",
+  ])("classifies %j as permanent", async (wording) => {
+    const run = vi.fn(() => Promise.reject(new Error(wording)));
+
+    await expect(
+      callWorkersAiChat({ messages: [] }, { binding: fakeBinding(run), model: "m" }),
+    ).rejects.toBeInstanceOf(PermanentUpstreamError);
+  });
+});
+
+/**
+ * Phase 9.1A review hardening: the pre-hardening default was
+ * "unrecognized failure ⇒ permanent" (fail closed). That risked
+ * permanently losing a message on a genuine transient binding/network
+ * blip that just didn't happen to mention a known code or wording. The
+ * policy is now inverted — only a positively-identified deterministic
+ * signal (above) is permanent; everything else, including a completely
+ * unrecognized failure shape or a non-`Error` thrown value, is treated
+ * as transient so Telegram's redelivery can retry it.
+ */
+describe("callWorkersAiChat — ambiguous/unrecognized call-layer failures default transient", () => {
+  it("classifies a completely unrecognized failure shape as transient (prefer retryable when permanence can't be established)", async () => {
     const run = vi.fn(() =>
       Promise.reject(new Error("some completely unrecognized failure shape")),
     );
 
     await expect(
       callWorkersAiChat({ messages: [] }, { binding: fakeBinding(run), model: "m" }),
-    ).rejects.toBeInstanceOf(PermanentUpstreamError);
+    ).rejects.toBeInstanceOf(TransientUpstreamError);
   });
 
-  it("classifies a non-Error thrown value as permanent", async () => {
+  it("classifies a non-Error thrown value as transient (an unrecognized call-layer failure shape, not a deterministic one)", async () => {
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- deliberately testing the non-Error-thrown-value defense path.
     const run = vi.fn(() => Promise.reject("a thrown string, not an Error"));
 
     await expect(
       callWorkersAiChat({ messages: [] }, { binding: fakeBinding(run), model: "m" }),
-    ).rejects.toBeInstanceOf(PermanentUpstreamError);
+    ).rejects.toBeInstanceOf(TransientUpstreamError);
   });
 });
 
