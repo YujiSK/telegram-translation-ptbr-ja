@@ -37,7 +37,7 @@
     // live — see docs/phase9-provider-plan.md, "Gemini Free Tier
     // privacy boundary". Only read/required when TRANSLATION_PROVIDER
     // is "workers-ai" — see src/config/app-config.ts.
-    "GEMINI_ESCALATION_ENABLED": "false",
+    "GEMINI_ESCALATION_ENABLED": "true",
     // Non-secret model identifier for the Gemini semantic-escalation
     // provider. Only required when GEMINI_ESCALATION_ENABLED is "true".
     "GEMINI_MODEL": "gemini-3.5-flash-lite",
