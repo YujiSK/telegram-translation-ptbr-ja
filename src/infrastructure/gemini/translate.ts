@@ -8,7 +8,7 @@ import type {
   TranslationOutcome,
   TranslationRequest,
 } from "../../domain/translation";
-import { PermanentUpstreamError } from "../../shared/errors";
+import { PermanentUpstreamError, TransientUpstreamError } from "../../shared/errors";
 import {
   TRANSLATION_JSON_SCHEMA,
   buildTranslationInputGemini,
@@ -58,6 +58,35 @@ function malformed(reason: string): never {
     `Gemini returned a malformed translation result: ${reason}`,
     "gemini",
   );
+}
+
+/**
+ * Interactions API responses are only safe to surface when the top-level
+ * interaction status is fully `completed`. A 2xx HTTP response can still
+ * represent an unfinished/failed interaction, so status validation must
+ * happen before reading any model-output step.
+ *
+ * `incomplete` / `requires_action` are deterministic for the returned
+ * interaction and therefore permanent for this delivery. Runtime states
+ * (`in_progress`, `failed`, `cancelled`) are treated as transient so a
+ * Telegram redelivery may retry with a fresh interaction. Missing/unknown
+ * status is a malformed successful provider response and stays permanent.
+ */
+function validateInteractionStatus(envelope: Record<string, unknown>): void {
+  const status = envelope.status;
+  if (status === "completed") {
+    return;
+  }
+  if (status === "in_progress" || status === "failed" || status === "cancelled") {
+    throw new TransientUpstreamError("Gemini interaction did not complete successfully", "gemini");
+  }
+  if (status === "incomplete" || status === "requires_action") {
+    throw new PermanentUpstreamError(
+      "Gemini interaction did not produce a final translation",
+      "gemini",
+    );
+  }
+  malformed("missing or unknown interaction status");
 }
 
 /**
@@ -257,6 +286,7 @@ async function translateWithGemini(
   if (!isRecord(envelope)) {
     malformed("response envelope was not a JSON object");
   }
+  validateInteractionStatus(envelope);
 
   const rawText = extractModelOutputText(envelope);
   const payload = parseStructuredOutput(rawText);

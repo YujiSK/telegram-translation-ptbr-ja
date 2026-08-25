@@ -27,8 +27,9 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function interactionEnvelope(payload: unknown): unknown {
+function interactionEnvelope(payload: unknown): Record<string, unknown> {
   return {
+    status: "completed",
     steps: [{ type: "model_output", content: [{ type: "text", text: JSON.stringify(payload) }] }],
   };
 }
@@ -295,6 +296,53 @@ describe("createGeminiTranslationBoundary — cross-field consistency", () => {
       PermanentUpstreamError,
     );
   });
+});
+
+describe("createGeminiTranslationBoundary — interaction completion status", () => {
+  it("accepts status=completed and continues to parse the final translation", async () => {
+    const { boundary } = boundaryWithResponse(jsonResponse(interactionEnvelope(VALID_JA_PAYLOAD)));
+    await expect(boundary.translate(request("こんにちは"))).resolves.toMatchObject({
+      kind: "translated",
+      translatedText: "resposta final do gemini",
+    });
+  });
+
+  it.each(["incomplete", "requires_action"])(
+    "rejects status=%s as a permanent non-final interaction",
+    async (status) => {
+      const { boundary } = boundaryWithResponse(
+        jsonResponse({ ...interactionEnvelope(VALID_JA_PAYLOAD), status }),
+      );
+      await expect(boundary.translate(request("hello"))).rejects.toBeInstanceOf(
+        PermanentUpstreamError,
+      );
+    },
+  );
+
+  it.each(["in_progress", "failed", "cancelled"])(
+    "rejects status=%s as transient/retryable",
+    async (status) => {
+      const { boundary } = boundaryWithResponse(
+        jsonResponse({ ...interactionEnvelope(VALID_JA_PAYLOAD), status }),
+      );
+      await expect(boundary.translate(request("hello"))).rejects.toBeInstanceOf(
+        TransientUpstreamError,
+      );
+    },
+  );
+
+  it.each([undefined, "mystery_status"])(
+    "rejects missing/unknown status (%s) as a malformed permanent response",
+    async (status) => {
+      const envelope = interactionEnvelope(VALID_JA_PAYLOAD);
+      if (status === undefined) delete envelope.status;
+      else envelope.status = status;
+      const { boundary } = boundaryWithResponse(jsonResponse(envelope));
+      await expect(boundary.translate(request("hello"))).rejects.toBeInstanceOf(
+        PermanentUpstreamError,
+      );
+    },
+  );
 });
 
 describe("createGeminiTranslationBoundary — upstream failures propagate unchanged", () => {

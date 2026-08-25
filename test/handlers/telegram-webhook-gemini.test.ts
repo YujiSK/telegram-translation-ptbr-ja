@@ -126,8 +126,9 @@ function workersAiChatCompletionResponse(payload: unknown): unknown {
   return { choices: [{ message: { role: "assistant", content: JSON.stringify(payload) } }] };
 }
 
-function geminiInteractionResponse(payload: unknown): unknown {
+function geminiInteractionResponse(payload: unknown): Record<string, unknown> {
   return {
+    status: "completed",
     steps: [{ type: "model_output", content: [{ type: "text", text: JSON.stringify(payload) }] }],
   };
 }
@@ -516,6 +517,56 @@ describe("POST /telegram/webhook — Gemini call-layer failures", () => {
       }),
     );
     await expect(redelivery.json()).resolves.toMatchObject({ outcome: "ignored:duplicate" });
+  });
+
+  it("an in-progress Gemini interaction returns 500 and releases dedupe, with no Telegram/OpenAI fallback", async () => {
+    await allowlistChat();
+    const fetchSpy = mockFetchDispatch({
+      gemini: () =>
+        Promise.resolve(
+          jsonResponse({
+            ...geminiInteractionResponse(GEMINI_FINAL_PAYLOAD),
+            status: "in_progress",
+          }),
+        ),
+    });
+    const updateId = 981000063;
+
+    const response = await callWorker(
+      webhookRequest(buildUpdate({ updateId })),
+      testEnv({
+        AI: workersAiAlwaysReturns(workersAiChatCompletionResponse(WORKERS_AI_ESCALATION_PAYLOAD)),
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(false);
+  });
+
+  it("an incomplete Gemini interaction returns 500 and keeps dedupe", async () => {
+    await allowlistChat();
+    const fetchSpy = mockFetchDispatch({
+      gemini: () =>
+        Promise.resolve(
+          jsonResponse({
+            ...geminiInteractionResponse(GEMINI_FINAL_PAYLOAD),
+            status: "incomplete",
+          }),
+        ),
+    });
+    const updateId = 981000064;
+
+    const response = await callWorker(
+      webhookRequest(buildUpdate({ updateId })),
+      testEnv({
+        AI: workersAiAlwaysReturns(workersAiChatCompletionResponse(WORKERS_AI_ESCALATION_PAYLOAD)),
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    await expect(isUpdateRecorded(updateId)).resolves.toBe(true);
   });
 
   it("malformed Gemini output returns 500 and keeps the dedupe reservation", async () => {
