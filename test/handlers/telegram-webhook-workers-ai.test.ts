@@ -8,8 +8,8 @@ import type { WorkersAiBinding } from "../../src/infrastructure/workers-ai/clien
 /**
  * Phase 9.1A: `POST /telegram/webhook` end to end with
  * `TRANSLATION_PROVIDER=workers-ai` (the new default —
- * `wrangler.jsonc`'s `env` already carries it, so this file's `testEnv`
- * does not override it). `env.AI` is always overridden with a synthetic
+ * `wrangler.jsonc`'s `env` already carries it). Individual tests may
+ * override Gemini escalation when exercising the disabled path. `env.AI` is always overridden with a synthetic
  * in-memory fake — this file never calls the real Workers AI binding.
  * Every test that could reach OpenAI or Telegram installs its own
  * `globalThis.fetch` spy that throws on any unexpected call, so a wiring
@@ -49,12 +49,18 @@ interface TestEnvOverrides {
   readonly TELEGRAM_WEBHOOK_SECRET?: string;
   readonly TELEGRAM_BOT_TOKEN?: string;
   readonly OPENAI_API_KEY?: string;
+  readonly GEMINI_ESCALATION_ENABLED?: string;
   readonly AI?: WorkersAiBinding;
 }
 
 /**
  * `OPENAI_API_KEY` is deliberately never set here — see "does not
- * require OPENAI_API_KEY" below. The real `env.AI` (typed `Ai`, the full
+ * require OPENAI_API_KEY" below. `wrangler types` narrows vars to their
+ * exact configured literal values, while this file intentionally overrides
+ * Gemini escalation to `"false"` for one disabled-path regression. The
+ * single `as Env` below widens those runtime string vars back to the Worker
+ * environment shape; it is not an unchecked double-cast. The real `env.AI`
+ * (typed `Ai`, the full
  * generated Workers AI binding class) is always replaced with a
  * synthetic `WorkersAiBinding` — only the `run` method production code
  * actually calls. `WorkersAiBinding` is a real subtype-compatible
@@ -71,7 +77,7 @@ function testEnv(overrides: TestEnvOverrides = {}): Env {
     TELEGRAM_BOT_TOKEN,
     ...rest,
     ...(fakeAi !== undefined ? { AI: fakeAi as Env["AI"] } : {}),
-  };
+  } as Env;
 }
 
 function webhookRequest(body: unknown): Request {
@@ -361,7 +367,10 @@ describe("POST /telegram/webhook — escalation required (Phase 9.1A, no Gemini 
 
     const response = await callWorker(
       webhookRequest(buildUpdate({ updateId })),
-      testEnv({ AI: alwaysReturns(chatCompletionResponse(escalationPayload)) }),
+      testEnv({
+        GEMINI_ESCALATION_ENABLED: "false",
+        AI: alwaysReturns(chatCompletionResponse(escalationPayload)),
+      }),
     );
 
     expect(response.status).toBe(200);

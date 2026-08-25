@@ -8,8 +8,8 @@ import type { WorkersAiBinding } from "../../src/infrastructure/workers-ai/clien
 /**
  * Phase 9.1B: `POST /telegram/webhook` end to end with
  * `TRANSLATION_PROVIDER=workers-ai` and `GEMINI_ESCALATION_ENABLED=true`
- * (this file's `testEnv` default — `wrangler.jsonc`'s own default is
- * "false", so every test here explicitly enables it). `env.AI` is always
+ * (both the pilot `wrangler.jsonc` setting and this file's `testEnv` default).
+ * `env.AI` is always
  * a synthetic in-memory fake; Gemini is reached only through `fetch`,
  * which every test that could reach it also mocks. No test in this file
  * ever performs a real Workers AI, Gemini, or Telegram API call.
@@ -45,7 +45,7 @@ function buildUpdate(
 
 /**
  * `wrangler types` generates each `vars` entry as its exact literal
- * value (e.g. `GEMINI_ESCALATION_ENABLED: "false"`), not `string` — see
+ * value (e.g. `GEMINI_ESCALATION_ENABLED: "true"`), not `string` — see
  * the identical widening pattern and rationale in
  * test/handlers/telegram-webhook-reliability.test.ts. `AI` and
  * `TRANSLATION_PROVIDER` are widened for the same reason (this file also
