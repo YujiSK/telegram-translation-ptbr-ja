@@ -8,6 +8,15 @@ const validWorkersAiInput: AppConfigInput = {
   TRANSLATION_PROVIDER: "workers-ai",
   WORKERS_AI_MODEL: "@cf/zai-org/glm-4.7-flash",
   MAX_TRANSLATABLE_MESSAGE_LENGTH: "4096",
+  GEMINI_ESCALATION_ENABLED: "false",
+};
+
+const validWorkersAiInputWithGeminiEnabled: AppConfigInput = {
+  ...validWorkersAiInput,
+  GEMINI_ESCALATION_ENABLED: "true",
+  GEMINI_MODEL: "gemini-3.5-flash-lite",
+  MAX_GEMINI_ATTEMPTS_PER_MINUTE: "12",
+  MAX_GEMINI_ATTEMPTS_PER_DAY: "450",
 };
 
 const validOpenAiInput: AppConfigInput = {
@@ -28,6 +37,7 @@ describe("validateAppConfig — valid input, workers-ai mode", () => {
         translationProvider: "workers-ai",
         workersAiModel: "@cf/zai-org/glm-4.7-flash",
         maxTranslatableMessageLength: 4096,
+        geminiEscalationEnabled: false,
       });
     }
   });
@@ -163,6 +173,184 @@ describe("validateAppConfig — WORKERS_AI_MODEL (workers-ai mode only)", () => 
       }
     },
   );
+});
+
+describe("validateAppConfig — GEMINI_ESCALATION_ENABLED (workers-ai mode only, Phase 9.1B)", () => {
+  it("fails fast when GEMINI_ESCALATION_ENABLED is missing in workers-ai mode", () => {
+    const result = validateAppConfig({
+      ...validWorkersAiInput,
+      GEMINI_ESCALATION_ENABLED: undefined,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.key).toBe("GEMINI_ESCALATION_ENABLED");
+    }
+  });
+
+  it("rejects an empty string", () => {
+    const result = validateAppConfig({ ...validWorkersAiInput, GEMINI_ESCALATION_ENABLED: "" });
+
+    expect(result.ok).toBe(false);
+  });
+
+  it.each(["True", "FALSE", "1", "0", "yes", "no", " true", "true "])(
+    "rejects %j — only the exact literals 'true'/'false' are accepted (strict boolean parsing)",
+    (value) => {
+      const result = validateAppConfig({
+        ...validWorkersAiInput,
+        GEMINI_ESCALATION_ENABLED: value,
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.key).toBe("GEMINI_ESCALATION_ENABLED");
+      }
+    },
+  );
+
+  it("is not required in openai mode", () => {
+    const result = validateAppConfig({ ...validOpenAiInput, GEMINI_ESCALATION_ENABLED: undefined });
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("does not include a geminiModel/budget field on the config when disabled", () => {
+    const result = validateAppConfig(validWorkersAiInput);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).not.toHaveProperty("geminiModel");
+      expect(result.value).not.toHaveProperty("maxGeminiAttemptsPerMinute");
+      expect(result.value).not.toHaveProperty("maxGeminiAttemptsPerDay");
+    }
+  });
+});
+
+describe("validateAppConfig — GEMINI_MODEL and Gemini budget (workers-ai mode + escalation enabled only)", () => {
+  it("accepts a fully valid workers-ai input with escalation enabled", () => {
+    const result = validateAppConfig(validWorkersAiInputWithGeminiEnabled);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toEqual({
+        environment: "development",
+        translationProvider: "workers-ai",
+        workersAiModel: "@cf/zai-org/glm-4.7-flash",
+        maxTranslatableMessageLength: 4096,
+        geminiEscalationEnabled: true,
+        geminiModel: "gemini-3.5-flash-lite",
+        maxGeminiAttemptsPerMinute: 12,
+        maxGeminiAttemptsPerDay: 450,
+      });
+    }
+  });
+
+  it("fails fast when GEMINI_MODEL is missing while escalation is enabled", () => {
+    const result = validateAppConfig({
+      ...validWorkersAiInputWithGeminiEnabled,
+      GEMINI_MODEL: undefined,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.key).toBe("GEMINI_MODEL");
+    }
+  });
+
+  it("rejects a blank (whitespace-only) GEMINI_MODEL", () => {
+    const result = validateAppConfig({
+      ...validWorkersAiInputWithGeminiEnabled,
+      GEMINI_MODEL: "   ",
+    });
+
+    expect(result.ok).toBe(false);
+  });
+
+  it.each([" gemini-3.5-flash-lite", "gemini-3.5-flash-lite "])(
+    "rejects leading or trailing whitespace in %j rather than normalizing it",
+    (geminiModel) => {
+      const result = validateAppConfig({
+        ...validWorkersAiInputWithGeminiEnabled,
+        GEMINI_MODEL: geminiModel,
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.key).toBe("GEMINI_MODEL");
+      }
+    },
+  );
+
+  it("fails fast when MAX_GEMINI_ATTEMPTS_PER_MINUTE is missing while escalation is enabled", () => {
+    const result = validateAppConfig({
+      ...validWorkersAiInputWithGeminiEnabled,
+      MAX_GEMINI_ATTEMPTS_PER_MINUTE: undefined,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.key).toBe("MAX_GEMINI_ATTEMPTS_PER_MINUTE");
+    }
+  });
+
+  it("rejects a non-positive MAX_GEMINI_ATTEMPTS_PER_MINUTE", () => {
+    const result = validateAppConfig({
+      ...validWorkersAiInputWithGeminiEnabled,
+      MAX_GEMINI_ATTEMPTS_PER_MINUTE: "0",
+    });
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("fails fast when MAX_GEMINI_ATTEMPTS_PER_DAY is missing while escalation is enabled", () => {
+    const result = validateAppConfig({
+      ...validWorkersAiInputWithGeminiEnabled,
+      MAX_GEMINI_ATTEMPTS_PER_DAY: undefined,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.key).toBe("MAX_GEMINI_ATTEMPTS_PER_DAY");
+    }
+  });
+
+  it("rejects a non-positive MAX_GEMINI_ATTEMPTS_PER_DAY", () => {
+    const result = validateAppConfig({
+      ...validWorkersAiInputWithGeminiEnabled,
+      MAX_GEMINI_ATTEMPTS_PER_DAY: "-1",
+    });
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("is never required in openai (legacy) mode, regardless of these vars being present", () => {
+    const result = validateAppConfig({
+      ...validOpenAiInput,
+      GEMINI_ESCALATION_ENABLED: "true",
+      GEMINI_MODEL: undefined,
+      MAX_GEMINI_ATTEMPTS_PER_MINUTE: undefined,
+      MAX_GEMINI_ATTEMPTS_PER_DAY: undefined,
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("GEMINI_API_KEY is never part of the returned config, even if present in input", () => {
+    const result = validateAppConfig({
+      ...validWorkersAiInputWithGeminiEnabled,
+      GEMINI_API_KEY: "synthetic-should-never-be-read-or-echoed",
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).not.toHaveProperty("geminiApiKey");
+      expect(result.value).not.toHaveProperty("GEMINI_API_KEY");
+      expect(JSON.stringify(result.value)).not.toContain(
+        "synthetic-should-never-be-read-or-echoed",
+      );
+    }
+  });
 });
 
 describe("validateAppConfig — OPENAI_MODEL (openai mode only)", () => {

@@ -27,7 +27,18 @@ OPENAI_API_KEY
 TELEGRAM_BOT_TOKEN
 TELEGRAM_WEBHOOK_SECRET
 SETUP_ADMIN_SECRET
+GEMINI_API_KEY
 ```
+
+**Phase 9.1B note on `GEMINI_API_KEY`:** implemented in source (read
+only inside `src/handlers/telegram-webhook.ts`'s `workers-ai`-mode
+branch, only when `GEMINI_ESCALATION_ENABLED=true`, and only lazily —
+inside the Gemini attempt-budget reservation closure, itself invoked
+only when Workers AI actually requests escalation) — never registered.
+A routine, non-escalating Workers AI translation never requires it,
+even with escalation enabled but the Secret missing (fails safe: 500,
+dedupe kept, Gemini never called — see `docs/architecture.md`, "Gemini
+semantic escalation adapter").
 
 - **Local development:** `.dev.vars` (gitignored). Only
   `.dev.vars.example`, with empty values, is tracked.
@@ -202,20 +213,25 @@ a future call site could accidentally widen.
 
 - Structured logs may include: `event`, `outcome`, `status`,
   `durationMs`, `updateId`, `chatId`, `errorClass`, `service`,
-  `limitType`, `attempt`, `retryCount`, and — **Phase 9.1A** — `provider`
-  (fixed enum `"workers-ai"` | `"openai"`) and `escalationReason` (fixed
-  6-value enum, e.g. `"ambiguous-context"`; never free text).
+  `limitType` (now including `"gemini-minute"`/`"gemini-daily"`, Phase
+  9.1B), `attempt`, `retryCount`, and — **Phase 9.1A/9.1B** — `provider`
+  (fixed enum `"workers-ai"` | `"openai"` | `"gemini"` — reflects the
+  actual final provider that produced the outcome, e.g. `"gemini"` on a
+  successful semantic escalation, not just the configured router mode)
+  and `escalationReason` (fixed 6-value enum, e.g. `"ambiguous-context"`;
+  never free text).
 - Structured logs must never include: message text (source or
   translated), reply-context text, full command text, correction
-  source/target terms, display names, full OpenAI/Workers AI prompts, raw
-  OpenAI/Workers AI/Telegram responses, Secret values, Authorization/header values,
+  source/target terms, display names, full OpenAI/Workers AI/Gemini
+  prompts, raw OpenAI/Workers AI/Gemini/Telegram responses, a Gemini
+  interaction/response ID, Secret values, Authorization/header values,
   API keys, bot tokens, the webhook secret, stack traces, or raw
   `Error.message` text — including any model-generated explanation for an
   escalation decision, which is discarded entirely; only the fixed
   `escalationReason` enum value may be logged. `classifyError()` is the
   sanctioned way to turn a caught error into log fields — it extracts
   only `error.name` (never `.message`) and a type-guard-checked
-  `service` (now including `"workers-ai"`, Phase 9.1A), never an
+  `service` (now including `"workers-ai"` and `"gemini"`), never an
   unchecked cast.
 - `src/handlers/telegram-webhook.ts`'s `finish()` helper logs exactly one
   structured event per request (the single final outcome), not a
@@ -291,6 +307,43 @@ HTTP API with its own key — the request stays within Cloudflare's
 platform rather than crossing to a third-party API boundary the way the
 OpenAI request does. No stored conversation history, Telegram IDs, bot
 tokens, or unrelated D1 rows are sent, matching the OpenAI path exactly.
+
+## Data sent to Gemini (Phase 9.1B, disabled by default)
+
+Identical scope and limits to "Data sent to OpenAI"/"Data sent to
+Workers AI" above — the same current-message text, at most one
+reply-context message, and the same resolved speaker-memory
+hints/corrections, never more, and never the same message twice: Gemini
+is called only as a semantic-escalation step for a Workers AI
+`needsEscalation: true` candidate, so a given message reaches at most
+one provider per phase of translation (Workers AI, then optionally
+Gemini — never both Workers AI and OpenAI, and never Gemini plus a
+third provider).
+
+**Explicitly never sent to Gemini:** the Workers AI provisional
+`translatedText`, its outcome, or any free-form model reasoning — only
+the original, unmodified `TranslationRequest` fields
+(`src/infrastructure/gemini/translate.ts`; `src/infrastructure/translation/router.ts`
+passes the same `request` object it received, not a
+Workers-AI-derived one). No stored conversation history, Telegram IDs,
+bot tokens, or unrelated D1 rows are sent, matching the OpenAI/Workers
+AI paths exactly. `store: false` is force-set on every Gemini request by
+`src/infrastructure/gemini/client.ts` itself — unconditionally, after
+the caller's own body is spread in, so no caller can omit or override
+it — and no `previous_interaction_id`, background mode, streaming, or
+tools/grounding are used; a returned interaction ID (if any) is never
+persisted, logged, or reused.
+
+**Gemini Free Tier data-treatment note (must not be confused with
+`store: false`):** Google's current pricing documentation states that
+Gemini API Free Tier data may be used to improve Google products.
+`store: false` only prevents Interactions-API server-side interaction
+storage/state management — it does **not** by itself mean Free Tier
+inputs are excluded from Google's product-improvement use. This is why
+live Gemini escalation against real family messages requires a separate,
+explicit privacy decision before `GEMINI_ESCALATION_ENABLED` is ever set
+to `true` in production — implementing the code (Phase 9.1B) is not
+that decision.
 
 ## Command response policy
 
@@ -415,6 +468,15 @@ confirm`, `/correct`, `/enable`, or `/disable` releases the dedupe
   command mutation is idempotent, so redelivery after release is safe —
   see `docs/architecture.md`, "Command D1 error classification and
   dedupe".
+- **Implemented (Phase 9.1B):** `src/infrastructure/gemini/client.ts`
+  applies the same discipline as the Workers AI adapter — a real
+  `AbortSignal`-based timeout, no automatic retry beyond the single
+  logical Gemini attempt a semantic escalation makes. Unlike Workers AI,
+  real HTTP status codes are available (no message-text pattern
+  matching): `408`/`429`/5xx/a network failure before any response is
+  transient; `400`/`401`/`403`/`404`/`422` or a malformed
+  successfully-returned response is permanent — see
+  `docs/architecture.md`, "Gemini semantic escalation adapter".
 
 ## D1 / SQL injection
 
@@ -447,17 +509,20 @@ plus the pre-existing tests each row's "Verified by" column names) — see
 were added by Phase 8A — see "Bootstrap endpoint threat model" above for
 the full per-threat breakdown.
 
-| Threat                             | Mitigation                                                                                                                                          | Verified by                                                                                                                                                                          |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Forged bootstrap request           | `SETUP_ADMIN_SECRET` header verification, before any body read/D1 access (Phase 8A)                                                                 | `admin-bootstrap.test.ts`, "authentication" (401, before any fetch or D1 access)                                                                                                     |
-| Unauthorized production bootstrap  | Bootstrap mutation is idempotent, admin-only, chat-enable-only (never disables), and every field is validated before reaching D1 (Phase 8A)         | `admin-bootstrap.test.ts`, "request validation" and "successful bootstrap"; `bootstrap.test.ts` (repository-level idempotency)                                                       |
-| Secret leak via commit             | Public-repo posture above; `.dev.vars` gitignored; Secrets never in `wrangler.jsonc`                                                                | Manual repo inspection (Phase 7 final verification); log-leak tests below confirm Secrets never reach logs either                                                                    |
-| Unauthorized chat usage            | Chat allowlist (`allowed_chats`) checked before any processing, before dedupe/rate counters                                                         | `telegram-webhook.test.ts` (unknown/disabled chat, 200 safe drop); `telegram-webhook-security.test.ts` (no `rate_limit_counters` row created for either case)                        |
-| Unauthorized admin action          | Explicit admin authorization check on `/enable`, `/disable`, etc.                                                                                   | `telegram-webhook-commands.test.ts`, "admin authorization" (non-admin caller ⇒ no mutation, `command:forbidden`)                                                                     |
-| Replayed/duplicate Telegram update | `processed_updates` dedupe by `update_id`, atomic under concurrency                                                                                 | `telegram-webhook.test.ts` (redelivery ⇒ `ignored:duplicate`); `repositories.test.ts` (`Promise.all` concurrency: exactly one reservation succeeds)                                  |
-| Forged webhook request             | `TELEGRAM_WEBHOOK_SECRET` header verification, before any body read/JSON parse/D1 access                                                            | `telegram-webhook.test.ts`, "secret verification" (401, before any other processing)                                                                                                 |
-| Prompt injection via message text  | Role separation + Structured Outputs; no text-to-action code path; command detection is prefix-based                                                | `telegram-webhook-security.test.ts`, "threat table — prompt injection" (instruction-shaped text reaches OpenAI only as user content; embedded `/disable` mid-message never executes) |
-| SQL injection                      | Parameterized queries only                                                                                                                          | `telegram-webhook-security.test.ts`, "threat table — SQL injection" (a `/correct` term shaped like a SQL-injection payload is stored literally; schema and other rows untouched)     |
-| Runaway OpenAI cost                | Per-chat OpenAI attempt burst limit + global daily attempt ceiling (Phase 7)                                                                        | `telegram-webhook-reliability.test.ts` (both limits block before any fetch, including the retry-exhausts-daily-budget case)                                                          |
-| Sensitive data at rest             | Storage allow/deny list in `docs/data-model.md`; no message text, translated text, or raw response stored anywhere, including the Phase 7 migration | `telegram-webhook-security.test.ts`, "threat table — sensitive data at rest" (live schema inspection of every table)                                                                 |
-| Log-based data leak                | Log minimization rules above; structured, field-allowlisted logging (Phase 7)                                                                       | `structured-log.test.ts`, `telegram-webhook-security.test.ts`, "threat table — log-based data leak" (captured log output never contains synthetic message/Secret/error text)         |
+| Threat                                        | Mitigation                                                                                                                                              | Verified by                                                                                                                                                                                       |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Forged bootstrap request                      | `SETUP_ADMIN_SECRET` header verification, before any body read/D1 access (Phase 8A)                                                                     | `admin-bootstrap.test.ts`, "authentication" (401, before any fetch or D1 access)                                                                                                                  |
+| Unauthorized production bootstrap             | Bootstrap mutation is idempotent, admin-only, chat-enable-only (never disables), and every field is validated before reaching D1 (Phase 8A)             | `admin-bootstrap.test.ts`, "request validation" and "successful bootstrap"; `bootstrap.test.ts` (repository-level idempotency)                                                                    |
+| Secret leak via commit                        | Public-repo posture above; `.dev.vars` gitignored; Secrets never in `wrangler.jsonc`                                                                    | Manual repo inspection (Phase 7 final verification); log-leak tests below confirm Secrets never reach logs either                                                                                 |
+| Unauthorized chat usage                       | Chat allowlist (`allowed_chats`) checked before any processing, before dedupe/rate counters                                                             | `telegram-webhook.test.ts` (unknown/disabled chat, 200 safe drop); `telegram-webhook-security.test.ts` (no `rate_limit_counters` row created for either case)                                     |
+| Unauthorized admin action                     | Explicit admin authorization check on `/enable`, `/disable`, etc.                                                                                       | `telegram-webhook-commands.test.ts`, "admin authorization" (non-admin caller ⇒ no mutation, `command:forbidden`)                                                                                  |
+| Replayed/duplicate Telegram update            | `processed_updates` dedupe by `update_id`, atomic under concurrency                                                                                     | `telegram-webhook.test.ts` (redelivery ⇒ `ignored:duplicate`); `repositories.test.ts` (`Promise.all` concurrency: exactly one reservation succeeds)                                               |
+| Forged webhook request                        | `TELEGRAM_WEBHOOK_SECRET` header verification, before any body read/JSON parse/D1 access                                                                | `telegram-webhook.test.ts`, "secret verification" (401, before any other processing)                                                                                                              |
+| Prompt injection via message text             | Role separation + Structured Outputs; no text-to-action code path; command detection is prefix-based                                                    | `telegram-webhook-security.test.ts`, "threat table — prompt injection" (instruction-shaped text reaches OpenAI only as user content; embedded `/disable` mid-message never executes)              |
+| SQL injection                                 | Parameterized queries only                                                                                                                              | `telegram-webhook-security.test.ts`, "threat table — SQL injection" (a `/correct` term shaped like a SQL-injection payload is stored literally; schema and other rows untouched)                  |
+| Runaway OpenAI cost                           | Per-chat OpenAI attempt burst limit + global daily attempt ceiling (Phase 7)                                                                            | `telegram-webhook-reliability.test.ts` (both limits block before any fetch, including the retry-exhausts-daily-budget case)                                                                       |
+| Sensitive data at rest                        | Storage allow/deny list in `docs/data-model.md`; no message text, translated text, or raw response stored anywhere, including the Phase 7 migration     | `telegram-webhook-security.test.ts`, "threat table — sensitive data at rest" (live schema inspection of every table)                                                                              |
+| Log-based data leak                           | Log minimization rules above; structured, field-allowlisted logging (Phase 7)                                                                           | `structured-log.test.ts`, `telegram-webhook-security.test.ts`, "threat table — log-based data leak" (captured log output never contains synthetic message/Secret/error text)                      |
+| Gemini `store: false` regression              | Force-set unconditionally in `src/infrastructure/gemini/client.ts`, after the caller's body is spread — no caller can omit or override it (Phase 9.1B)  | `test/infrastructure/gemini/client.test.ts` and `telegram-webhook-gemini.test.ts` (asserts `store: false` even against a caller-supplied `store: true`, and on every real webhook-triggered call) |
+| Gemini API key / interaction-ID leak          | `x-goog-api-key` header only, never a query parameter or logged field; interaction IDs never persisted/logged/reused (Phase 9.1B)                       | `client.test.ts` ("no Secret or raw error body leakage"), `telegram-webhook-gemini.test.ts` ("Gemini security/privacy invariants")                                                                |
+| Unauthorized/premature live Gemini escalation | `GEMINI_ESCALATION_ENABLED=false` by default; `GEMINI_API_KEY` unregistered; live enablement requires a separate privacy decision + deploy (Phase 9.1B) | `app-config.test.ts` (strict boolean parsing, conditional requirement); `telegram-webhook-gemini.test.ts` ("escalation disabled" / "Secret is missing")                                           |

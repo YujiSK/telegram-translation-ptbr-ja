@@ -202,6 +202,36 @@ secret put OPENAI_API_KEY` again (overwrites in place), confirm the
 - Never stored in this repository in any form, including `.dev.vars`
   (gitignored, but still never committed).
 
+### `GEMINI_API_KEY` (Phase 9.1B — future, not yet an approved unit)
+
+Implemented in source (`src/infrastructure/gemini/`,
+`src/handlers/telegram-webhook.ts`) but genuinely not registered, and
+not part of the nine-unit Phase 8B approval matrix above — registering
+it, and separately enabling `GEMINI_ESCALATION_ENABLED` in production
+config, are both distinct future actions requiring their own explicit
+approval, only relevant once a Phase 9.1A/9.1B deploy is itself
+approved.
+
+- **Source:** Google AI Studio / the Gemini API console — create a
+  project-scoped key for this bot.
+- **Registration (future):** `npx wrangler secret put GEMINI_API_KEY`
+  (interactive prompt) — same never-as-a-CLI-argument rule as every
+  other Secret above.
+- **Verification (future):** `npx wrangler secret list` confirms the
+  name is present. A real end-to-end check requires
+  `GEMINI_ESCALATION_ENABLED=true` and a genuinely ambiguous message in
+  the pilot chat — not exercised until Phase 9.1B's live pilot step,
+  which is not scheduled by this document.
+- **Rotation (future):** generate a new key in the Gemini API console,
+  `wrangler secret put GEMINI_API_KEY` again (overwrites in place),
+  confirm the Worker is serving correctly, then revoke the old key.
+- **Revoke source:** the Gemini API console.
+- **Before registering this Secret at all:** the Gemini Free Tier
+  data-treatment implications (docs/security-and-privacy.md, "Data sent
+  to Gemini") must be explicitly reviewed and accepted — registering the
+  key is not itself that review.
+- Never stored in this repository in any form, including `.dev.vars`.
+
 ### `TELEGRAM_BOT_TOKEN` (unit C)
 
 - **Source:** BotFather, from "Telegram bot creation" above (or
@@ -613,15 +643,22 @@ the rest of this document — no Worker is deployed).
 **Config values**, all non-secret `wrangler.jsonc` `vars` (never
 Secrets — they're operational tuning knobs, not credentials):
 
-| Var                                       | Default | What it limits                                                          |
-| ----------------------------------------- | ------- | ----------------------------------------------------------------------- |
-| `MAX_HANDLED_UPDATES_PER_CHAT_PER_MINUTE` | 60      | Commands + ordinary text combined, per allowlisted chat, per UTC minute |
-| `MAX_OPENAI_ATTEMPTS_PER_CHAT_PER_MINUTE` | 20      | Real OpenAI HTTP attempts (incl. retries), per chat, per UTC minute     |
-| `MAX_OPENAI_ATTEMPTS_PER_DAY`             | 300     | Real OpenAI HTTP attempts (incl. retries), whole bot, per UTC day       |
+| Var                                       | Default | What it limits                                                                           |
+| ----------------------------------------- | ------- | ---------------------------------------------------------------------------------------- |
+| `MAX_HANDLED_UPDATES_PER_CHAT_PER_MINUTE` | 60      | Commands + ordinary text combined, per allowlisted chat, per UTC minute                  |
+| `MAX_OPENAI_ATTEMPTS_PER_CHAT_PER_MINUTE` | 20      | Real OpenAI HTTP attempts (incl. retries), per chat, per UTC minute                      |
+| `MAX_OPENAI_ATTEMPTS_PER_DAY`             | 300     | Real OpenAI HTTP attempts (incl. retries), whole bot, per UTC day                        |
+| `MAX_GEMINI_ATTEMPTS_PER_MINUTE`          | 12      | Real Gemini HTTP attempts, whole bot (global, not per-chat), per UTC minute (Phase 9.1B) |
+| `MAX_GEMINI_ATTEMPTS_PER_DAY`             | 450     | Real Gemini HTTP attempts, whole bot, per UTC day (Phase 9.1B)                           |
 
 These were chosen as family-scale-appropriate safe defaults without any
 real production usage data (Phase 9's pilot is the first time real usage
-patterns will exist) — see `docs/implementation-plan.md` Phase 7.
+patterns will exist) — see `docs/implementation-plan.md` Phase 7. The
+two Gemini ceilings (Phase 9.1B) are additionally chosen to sit below
+the project's observed 15 RPM / 500 RPD free-tier Gemini quota on
+2026-08-25 (`docs/phase9-provider-plan.md`), leaving headroom rather
+than claiming a billing guarantee — moot until `GEMINI_ESCALATION_ENABLED`
+is ever set to `true` in production, which it is not.
 
 **Ceiling behavior:** exceeding any of the three responds 200 to
 Telegram (never a visible error to the family group — no reply is sent
@@ -636,10 +673,13 @@ below for changing the limit itself.
 **What's visible in Workers Logs:** only the structured, field-
 allowlisted log line described in `docs/architecture.md`, "Structured
 logging" — for a rate/usage block specifically: `event`, `outcome`
-(`ignored:rate-limited` or `ignored:usage-limit`), `status: 200`,
-`limitType` (`chat-updates`, `chat-openai`, or `openai-daily`), and
-`chatId` when the limit is per-chat. Never message text, never which
-specific command or translation was blocked beyond that.
+(`ignored:rate-limited`, `ignored:usage-limit`, or — for an exhausted
+Gemini budget, Phase 9.1B — `ignored:escalation-unavailable`),
+`status: 200`, `limitType` (`chat-updates`, `chat-openai`,
+`openai-daily`, or — Phase 9.1B — `gemini-minute`/`gemini-daily`), and
+`chatId` when the limit is per-chat (Gemini's limits are global, so no
+`chatId` is logged for them). Never message text, never which specific
+command or translation was blocked beyond that.
 
 **Operator behavior when a ceiling is hit:** for the per-chat limits, no
 action is normally needed — they're designed to recover within a minute

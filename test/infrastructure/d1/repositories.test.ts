@@ -32,10 +32,10 @@ beforeEach(async () => {
   ]);
 });
 
-describe("D1 migrations 0001–0004 applied in order", () => {
-  it("creates every Phase 2, Phase 5, Phase 6, and Phase 7 table plus the migration ledger", async () => {
+describe("D1 migrations 0001–0005 applied in order", () => {
+  it("creates every Phase 2, Phase 5, Phase 6, Phase 7, and Phase 9.1B table plus the migration ledger", async () => {
     const rows = await env.DB.prepare(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('allowed_chats', 'processed_updates', 'speaker_profiles', 'speaker_preferences', 'translation_corrections', 'bot_admins', 'rate_limit_counters', 'openai_daily_usage', 'd1_migrations') ORDER BY name",
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('allowed_chats', 'processed_updates', 'speaker_profiles', 'speaker_preferences', 'translation_corrections', 'bot_admins', 'rate_limit_counters', 'openai_daily_usage', 'provider_usage_counters', 'd1_migrations') ORDER BY name",
     ).all();
 
     expect(rows.results.map((row) => row.name)).toEqual([
@@ -44,6 +44,7 @@ describe("D1 migrations 0001–0004 applied in order", () => {
       "d1_migrations",
       "openai_daily_usage",
       "processed_updates",
+      "provider_usage_counters",
       "rate_limit_counters",
       "speaker_preferences",
       "speaker_profiles",
@@ -51,13 +52,14 @@ describe("D1 migrations 0001–0004 applied in order", () => {
     ]);
   });
 
-  it("recorded all four migrations in the ledger", async () => {
+  it("recorded all five migrations in the ledger", async () => {
     const rows = await env.DB.prepare("SELECT name FROM d1_migrations ORDER BY name").all();
     expect(rows.results.map((row) => row.name)).toEqual([
       "0001_initial.sql",
       "0002_speaker_memory.sql",
       "0003_commands.sql",
       "0004_reliability.sql",
+      "0005_provider_usage.sql",
     ]);
   });
 

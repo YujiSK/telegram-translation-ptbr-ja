@@ -18,4 +18,6 @@ interface Env {
   OPENAI_API_KEY?: string;
   /** Phase 8A: authenticates `POST /admin/bootstrap` — see src/handlers/admin-bootstrap.ts. */
   SETUP_ADMIN_SECRET?: string;
+  /** Phase 9.1B: only read when GEMINI_ESCALATION_ENABLED is "true" — see src/handlers/telegram-webhook.ts. Never registered by this task; this is a source-only declaration. */
+  GEMINI_API_KEY?: string;
 }

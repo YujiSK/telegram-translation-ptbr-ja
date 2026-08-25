@@ -18,10 +18,11 @@ import type { EscalationReason, UpstreamService } from "./errors";
  * caught `unknown` into loggable fields.
  */
 
-export type LogLimitType = "chat-updates" | "chat-openai" | "openai-daily";
+export type LogLimitType =
+  "chat-updates" | "chat-openai" | "openai-daily" | "gemini-minute" | "gemini-daily";
 
-/** Phase 9.1A: which translation provider handled (or was selected for) this request — a fixed enum, never a model ID or wire-format detail. */
-export type LogProvider = "workers-ai" | "openai";
+/** Phase 9.1A/9.1B: which translation provider actually produced (or was selected for) this request's final outcome — a fixed enum, never a model ID or wire-format detail. For a Gemini-escalated translation this is "gemini", not "workers-ai" — see src/infrastructure/translation/router.ts's onFinalProviderSelected. */
+export type LogProvider = "workers-ai" | "openai" | "gemini";
 
 export interface LogFields {
   readonly event: string;
@@ -52,8 +53,21 @@ export function logStructuredEvent(fields: LogFields, sink: LogSink = defaultSin
   sink(JSON.stringify(fields));
 }
 
+/**
+ * Phase 9.1B review note: this guard previously omitted "workers-ai"
+ * (added to `UpstreamService` in Phase 9.1A but never added here), which
+ * meant a Workers AI upstream error's `service` field silently never
+ * reached the log. Fixed here alongside adding "gemini" for the same
+ * reason — both are real `UpstreamService` members.
+ */
 function isUpstreamService(value: unknown): value is UpstreamService {
-  return value === "telegram" || value === "openai" || value === "d1";
+  return (
+    value === "telegram" ||
+    value === "openai" ||
+    value === "d1" ||
+    value === "workers-ai" ||
+    value === "gemini"
+  );
 }
 
 /**

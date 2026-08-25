@@ -113,6 +113,22 @@ describe("classifyError", () => {
     });
   });
 
+  it("extracts a stable errorClass and service='workers-ai' — Phase 9.1B review fix, previously silently dropped", () => {
+    const error = new TransientUpstreamError("synthetic workers-ai failure detail", "workers-ai");
+    expect(classifyError(error)).toEqual({
+      errorClass: "TransientUpstreamError",
+      service: "workers-ai",
+    });
+  });
+
+  it("extracts a stable errorClass and service='gemini' (Phase 9.1B)", () => {
+    const error = new PermanentUpstreamError("synthetic gemini failure detail", "gemini");
+    expect(classifyError(error)).toEqual({
+      errorClass: "PermanentUpstreamError",
+      service: "gemini",
+    });
+  });
+
   it("extracts errorClass without a service for a non-upstream AppError", () => {
     const error = new ValidationError("synthetic validation failure detail");
     expect(classifyError(error)).toEqual({ errorClass: "ValidationError" });

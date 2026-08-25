@@ -12,6 +12,10 @@ import { isBotAdmin } from "../infrastructure/d1/bot-admins";
 import { forgetSpeakerData } from "../infrastructure/d1/forget-me";
 import { recordUpdateIfNew, releaseProcessedUpdate } from "../infrastructure/d1/processed-updates";
 import {
+  consumeGeminiDailyAttemptLimit,
+  consumeGeminiMinuteAttemptLimit,
+} from "../infrastructure/d1/provider-usage-counters";
+import {
   consumeChatHandledUpdateLimit,
   consumeChatOpenAiAttemptLimit,
   consumeDailyOpenAiAttemptLimit,
@@ -32,18 +36,25 @@ import {
   upsertTranslationCorrection,
 } from "../infrastructure/d1/translation-corrections";
 import { sendMessage } from "../infrastructure/telegram/send-message";
+import { createGeminiTranslationBoundary } from "../infrastructure/gemini/translate";
 import { translateMessage } from "../infrastructure/openai/translate";
 import { createTranslationRouter } from "../infrastructure/translation/router";
 import { createWorkersAiTranslationProvider } from "../infrastructure/workers-ai/translate";
 import { parseTelegramUpdate } from "../infrastructure/telegram/parse-update";
 import { isWebhookSecretValid } from "../infrastructure/telegram/webhook-secret";
 import {
+  ConfigurationError,
   EscalationRequiredError,
   RateLimitExceededError,
   TransientUpstreamError,
   UsageLimitExceededError,
 } from "../shared/errors";
-import { classifyError, logStructuredEvent, type LogFields } from "../shared/structured-log";
+import {
+  classifyError,
+  logStructuredEvent,
+  type LogFields,
+  type LogProvider,
+} from "../shared/structured-log";
 import { minuteWindowId, utcDayId } from "../shared/time-windows";
 
 /**
@@ -432,6 +443,12 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     WORKERS_AI_MODEL: env.WORKERS_AI_MODEL,
     OPENAI_MODEL: env.OPENAI_MODEL,
     MAX_TRANSLATABLE_MESSAGE_LENGTH: env.MAX_TRANSLATABLE_MESSAGE_LENGTH,
+    // Phase 9.1B: only actually required (and only read) when
+    // TRANSLATION_PROVIDER=workers-ai — see src/config/app-config.ts.
+    GEMINI_ESCALATION_ENABLED: env.GEMINI_ESCALATION_ENABLED,
+    GEMINI_MODEL: env.GEMINI_MODEL,
+    MAX_GEMINI_ATTEMPTS_PER_MINUTE: env.MAX_GEMINI_ATTEMPTS_PER_MINUTE,
+    MAX_GEMINI_ATTEMPTS_PER_DAY: env.MAX_GEMINI_ATTEMPTS_PER_DAY,
   });
   if (!configResult.ok) {
     // Persistent misconfiguration — releasing would not help a retry, so
@@ -475,15 +492,91 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   // runtime fan-out (docs/architecture.md, "Translation provider
   // router"). Workers AI mode needs no Secret at all (env.AI is a
   // binding, not a Secret) and never consumes the Phase 7
-  // OpenAI-specific rate/usage counters below.
+  // OpenAI-specific rate/usage counters below. Phase 9.1B: tracks which
+  // provider actually produced the final outcome (workers-ai, or gemini
+  // on a semantic escalation) for the success log line below — see
+  // src/infrastructure/translation/router.ts, "Provider metadata".
   let translateBoundary: TranslateBoundary;
+  let finalProvider: LogProvider = config.translationProvider;
   if (config.translationProvider === "workers-ai") {
+    // Phase 9.1B: Gemini escalation wiring. "Is a gemini boundary
+    // actually supplied to the router" is the sole signal the router
+    // uses to decide escalation availability — see
+    // src/infrastructure/translation/router.ts's module doc comment.
+    // GEMINI_API_KEY presence is deliberately checked only inside
+    // reserveGeminiAttempt below, which the router calls only when
+    // Workers AI actually requests escalation — a routine (non-
+    // escalating) Workers AI translation never touches this check, so
+    // it never requires the Secret even when escalation is enabled but
+    // Gemini setup is incomplete (docs/security-and-privacy.md, "Secret
+    // handling"; Phase 9.1B task spec §15/§35: "The routine Workers AI
+    // path must not require the Gemini key when no escalation occurs").
+    let geminiBoundary: TranslateBoundary | undefined;
+    let reserveGeminiAttempt: (() => Promise<void>) | undefined;
+    if (config.geminiEscalationEnabled) {
+      // Phase 9.1B: reserves one unit of the global Gemini attempt
+      // budget immediately before the single Gemini HTTP attempt a
+      // semantic escalation makes — minute ceiling first, then the
+      // daily ceiling, mirroring reserveOpenAiAttempt's ordering below
+      // (docs/architecture.md, "Rate limiting and usage ceiling
+      // placement"). Captured as a closure so
+      // infrastructure/translation/router.ts never imports D1 directly.
+      // The Secret check runs first, before any D1 access, so a missing
+      // key never consumes a budget unit for a call that could never
+      // have succeeded anyway.
+      reserveGeminiAttempt = async (): Promise<void> => {
+        const geminiApiKey = env.GEMINI_API_KEY;
+        if (geminiApiKey === undefined || geminiApiKey === "") {
+          // Escalation is enabled but the Secret isn't registered yet —
+          // fail safe. Never silently fall back to "escalation
+          // disabled" and never call Gemini without a key. Not a
+          // TransientUpstreamError: a bare redelivery would not fix a
+          // missing Secret, so the dedupe reservation stays kept.
+          throw new ConfigurationError(
+            "Gemini escalation is enabled but GEMINI_API_KEY is not registered",
+          );
+        }
+
+        const nowMs = Date.now();
+        const minuteAllowed = await consumeGeminiMinuteAttemptLimit(
+          env.DB,
+          minuteWindowId(nowMs),
+          config.maxGeminiAttemptsPerMinute,
+        );
+        if (!minuteAllowed) {
+          throw new RateLimitExceededError("Gemini per-minute attempt budget exceeded");
+        }
+        const dailyAllowed = await consumeGeminiDailyAttemptLimit(
+          env.DB,
+          utcDayId(nowMs),
+          config.maxGeminiAttemptsPerDay,
+        );
+        if (!dailyAllowed) {
+          throw new UsageLimitExceededError("Global daily Gemini attempt ceiling exceeded");
+        }
+      };
+
+      // Never actually invoked with an empty apiKey: reserveGeminiAttempt
+      // above always runs first (see src/infrastructure/translation/router.ts)
+      // and throws before this boundary's `translate` is ever called if
+      // the Secret is missing.
+      geminiBoundary = createGeminiTranslationBoundary({
+        apiKey: env.GEMINI_API_KEY ?? "",
+        model: config.geminiModel,
+      });
+    }
+
     translateBoundary = createTranslationRouter({
       mode: "workers-ai",
       workersAi: createWorkersAiTranslationProvider({
         binding: env.AI,
         model: config.workersAiModel,
       }),
+      ...(geminiBoundary !== undefined ? { gemini: geminiBoundary } : {}),
+      ...(reserveGeminiAttempt !== undefined ? { beforeGeminiAttempt: reserveGeminiAttempt } : {}),
+      onFinalProviderSelected: (provider) => {
+        finalProvider = provider;
+      },
     });
   } else {
     const openaiApiKey = env.OPENAI_API_KEY;
@@ -588,13 +681,17 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
       outcome: webhookOutcome,
       updateId: update.updateId,
       chatId: update.chatId,
-      provider: config.translationProvider,
+      // Phase 9.1B: the provider that actually produced this outcome —
+      // "gemini" on a semantic escalation, not the configured router
+      // mode. See "Phase 9.1B: Gemini escalation wiring" above.
+      provider: finalProvider,
     });
   } catch (error) {
     if (error instanceof EscalationRequiredError) {
       // Dedupe reservation KEPT — retrying the identical message would
-      // just re-derive the same escalation decision (Gemini escalation
-      // is Phase 9.1B, not available yet). See src/shared/errors.ts.
+      // just re-derive the same escalation decision. Reached only when
+      // Gemini escalation is disabled or not configured — see
+      // src/infrastructure/translation/router.ts and src/shared/errors.ts.
       return finish(accepted("ignored:escalation-unavailable"), startedAt, {
         event: "telegram_webhook",
         outcome: "ignored:escalation-unavailable",
@@ -605,6 +702,23 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
       });
     }
     if (error instanceof RateLimitExceededError) {
+      // Phase 9.1B: in workers-ai mode, only reserveGeminiAttempt's
+      // minute check can throw this — the OpenAI reservation closure is
+      // never constructed in this mode (see "Phase 9.1B: Gemini
+      // escalation wiring" above), so this branch is unambiguous.
+      if (config.translationProvider === "workers-ai") {
+        // Dedupe reservation KEPT — a redelivery would just re-derive
+        // the same escalation-required decision; Gemini was never
+        // called, matching the "escalation unavailable" outcome family.
+        return finish(accepted("ignored:escalation-unavailable"), startedAt, {
+          event: "telegram_webhook",
+          outcome: "ignored:escalation-unavailable",
+          updateId: update.updateId,
+          chatId: update.chatId,
+          provider: "gemini",
+          limitType: "gemini-minute",
+        });
+      }
       // Dedupe reservation KEPT — same reasoning as the inbound limit above.
       return finish(accepted("ignored:rate-limited"), startedAt, {
         event: "telegram_webhook",
@@ -616,6 +730,17 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
       });
     }
     if (error instanceof UsageLimitExceededError) {
+      // Phase 9.1B: same provider-branch disambiguation as RateLimitExceededError above.
+      if (config.translationProvider === "workers-ai") {
+        return finish(accepted("ignored:escalation-unavailable"), startedAt, {
+          event: "telegram_webhook",
+          outcome: "ignored:escalation-unavailable",
+          updateId: update.updateId,
+          chatId: update.chatId,
+          provider: "gemini",
+          limitType: "gemini-daily",
+        });
+      }
       // Dedupe reservation KEPT — same reasoning as the inbound limit above.
       return finish(accepted("ignored:usage-limit"), startedAt, {
         event: "telegram_webhook",

@@ -16,7 +16,7 @@ export type ErrorCode =
   | "USAGE_LIMIT_EXCEEDED"
   | "ESCALATION_REQUIRED";
 
-export type UpstreamService = "telegram" | "openai" | "d1" | "workers-ai";
+export type UpstreamService = "telegram" | "openai" | "d1" | "workers-ai" | "gemini";
 
 /**
  * Phase 9.1A: a fixed, closed set of reasons a routine translation
@@ -24,8 +24,9 @@ export type UpstreamService = "telegram" | "openai" | "d1" | "workers-ai";
  * than it can safely handle itself — never free-form model-generated
  * text (docs/security-and-privacy.md, "Log minimization": only a fixed
  * enum reason may ever be logged, never an explanation string). Gemini
- * escalation itself is Phase 9.1B; in Phase 9.1A any of these reasons
- * simply means the message cannot be safely translated yet.
+ * escalation to Gemini (Phase 9.1B, `src/infrastructure/gemini/`) is
+ * attempted only when the router is actually configured with a Gemini
+ * boundary — see `src/infrastructure/translation/router.ts`.
  */
 export type EscalationReason =
   | "none"
@@ -152,17 +153,21 @@ export class UsageLimitExceededError extends AppError {
 /**
  * Phase 9.1A: a safe, expected control-flow signal — the routine
  * (Workers AI) provider determined this specific message needs stronger
- * handling than it can provide (`needsEscalation: true`), and no
- * escalation provider is wired up yet (Gemini is Phase 9.1B). Never an
- * upstream failure — the provider call itself succeeded and returned a
- * structurally valid, cross-field-consistent result; this only means the
- * *router* has nowhere safe to send that result. The webhook responds
- * 200 with a distinct `ignored:escalation-unavailable` outcome and —
- * since this is not a `TransientUpstreamError` — keeps the dedupe
- * reservation: retrying the identical message would just re-derive the
- * same escalation decision, so there is no retry benefit, and keeping
- * the reservation avoids an unbounded Telegram redelivery loop. See
- * docs/architecture.md, "Translation provider router".
+ * handling than it can provide (`needsEscalation: true`), and the router
+ * has no escalation provider configured to send it to. As of Phase 9.1B
+ * this happens when Gemini escalation is disabled (`GEMINI_ESCALATION_ENABLED=false`)
+ * or Gemini's config/Secret is missing — see
+ * `src/infrastructure/translation/router.ts`; before Phase 9.1B it
+ * happened unconditionally, since no escalation provider existed at all.
+ * Never an upstream failure — the provider call itself succeeded and
+ * returned a structurally valid, cross-field-consistent result; this
+ * only means the *router* has nowhere safe to send that result. The
+ * webhook responds 200 with a distinct `ignored:escalation-unavailable`
+ * outcome and — since this is not a `TransientUpstreamError` — keeps the
+ * dedupe reservation: retrying the identical message would just
+ * re-derive the same escalation decision, so there is no retry benefit,
+ * and keeping the reservation avoids an unbounded Telegram redelivery
+ * loop. See docs/architecture.md, "Translation provider router".
  */
 export class EscalationRequiredError extends AppError {
   readonly code = "ESCALATION_REQUIRED" as const;

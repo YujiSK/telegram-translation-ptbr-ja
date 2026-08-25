@@ -6,8 +6,10 @@ migrations, production Secrets, admin/chat bootstrap, and Telegram
 webhook are live. Phase 9 (pilot) started and is currently paused for the
 Phase 9.1 provider redesign. Phase 9.1A (provider abstraction + Workers
 AI routine path) is completed — implemented and tested locally/in CI
-only, not deployed. Phase 9.1B (Gemini escalation) and DeepL are not
-started.** OpenAI
+only, not deployed. Phase 9.1B (Gemini semantic escalation) is
+completed — implemented and tested locally/in CI only, not deployed,
+and disabled by default (`GEMINI_ESCALATION_ENABLED=false`) even once a
+future deploy happens. DeepL is not started.** OpenAI
 translation local implementation: Completed. Structured Outputs mock
 tests: Completed. Telegram reply orchestration mock tests: Completed.
 Speaker Memory local schema: Completed. Memory repository: Completed.
@@ -664,6 +666,107 @@ connection for the `AI` binding.
 - **次フェーズへ進む前の停止点:** Reached. Stop after CI is green — do
   not proceed to Phase 9.1B (Gemini) or any external/production action
   as part of this phase.
+
+---
+
+## Phase 9.1B — Gemini semantic escalation
+
+**Status: completed.** Implemented as
+`src/infrastructure/gemini/{client.ts,translate.ts}` (a fetch-based
+Gemini Interactions API client — no SDK — with a single bounded HTTP
+attempt, `store: false` unconditionally force-set on every request, and
+real HTTP-status-based error classification: `400`/`401`/`403`/`404`/`422`
+permanent, `408`/`429`/5xx/network-before-response transient) and
+`src/prompts/translation-gemini.ts` (reuses `translation-shared.ts`'s
+provider-neutral text and `translation-v1.ts`'s `TRANSLATION_JSON_SCHEMA`
+directly, since Gemini's output contract has no escalation concept).
+`src/infrastructure/translation/router.ts` was extended (not rewritten)
+with an optional `gemini`/`beforeGeminiAttempt`/`onFinalProviderSelected`
+surface: when Workers AI's candidate has `needsEscalation: true` and a
+`gemini` boundary is configured, the router calls Gemini exactly once
+with the **original** `TranslationRequest` — never Workers AI's
+provisional translation; when `gemini` is not configured, Phase 9.1A's
+`EscalationRequiredError` behavior is unchanged. New non-secret config
+(`GEMINI_ESCALATION_ENABLED`, `GEMINI_MODEL`,
+`MAX_GEMINI_ATTEMPTS_PER_MINUTE`, `MAX_GEMINI_ATTEMPTS_PER_DAY`) lives in
+`src/config/app-config.ts`'s `workers-ai` `AppConfig` variant, required
+only when escalation is enabled; `GEMINI_API_KEY` is deliberately not
+part of `AppConfig` and is checked lazily inside the webhook's Gemini
+budget-reservation closure, so a routine (non-escalating) Workers AI
+translation never requires it. New migration
+`migrations/0005_provider_usage.sql` adds `provider_usage_counters` (a
+generic, provider-aware analog of Phase 7's `rate_limit_counters`,
+tracking a global — not per-chat — Gemini minute/day attempt budget);
+the existing OpenAI-specific `rate_limit_counters`/`openai_daily_usage`
+tables are untouched. `src/handlers/telegram-webhook.ts` wires the
+Gemini boundary and budget-reservation closure only inside the
+`workers-ai`-mode branch, maps a Gemini-budget-exhaustion
+`RateLimitExceededError`/`UsageLimitExceededError` to 200
+`ignored:escalation-unavailable` (distinct from the legacy
+`openai`-mode rate/usage outcomes), and logs the actual final provider
+(`workers-ai`, `openai`, or `gemini` on a successful escalation) via the
+router's new `onFinalProviderSelected` observer callback — `TranslationOutcome`
+itself was never touched, so `translateAndReply()` required no changes.
+`npm run check` green (40 test files, 826 tests, up from 692 at the end
+of the Phase 9.1A review-fix) and CI green. See
+`docs/architecture.md`, "Translation provider router (Phase 9.1A /
+Phase 9.1B)", for the full design and `docs/phase9-provider-plan.md`,
+"Phase 9.1B implementation record", for how this maps to the original
+plan.
+
+**Explicitly not implemented, per this task's own scope:** DeepL, any
+third `TRANSLATION_PROVIDER` mode for Gemini, and any production
+deployment. `GEMINI_ESCALATION_ENABLED=false` remains the default in
+`wrangler.jsonc` — live Gemini escalation requires three separate future
+approvals (Secret registration, an explicit Free Tier data-treatment
+acceptance, and a deploy), none of which happened as part of this task.
+The exact Gemini Interactions API request/response contract used is a
+documented best-effort interpretation of the task's own stated
+operational facts — outbound access to `ai.google.dev` was blocked in
+this implementation environment, so it could not be re-verified against
+live Google documentation; this is flagged explicitly in
+`src/infrastructure/gemini/client.ts` and `docs/phase9-provider-plan.md`
+for re-verification before any live call.
+
+- **目的:** Add Gemini 3.5 Flash Lite as the semantic-escalation
+  provider for a Workers AI `needsEscalation: true` candidate, plus the
+  minimum provider-aware D1 usage controls needed to protect the
+  project's free-tier Gemini quota — while keeping Gemini disabled by
+  default and never a substitute for a Workers AI infrastructure
+  failure.
+- **実装内容:** See "Status: completed" above for the full file list.
+- **前提条件:** Phase 9.1A (provider abstraction + Workers AI routine
+  path) and its review-hardening pass complete.
+- **完了条件:** `npm run check` green (all Phase 9.1A tests unchanged
+  and passing, plus new provider/D1/config/webhook Gemini test suites);
+  no `any`, no `as unknown as X`; the new D1 migration verified locally
+  only; no external side effect of any kind; CI green.
+- **テスト:** Unit tests for the Gemini client (request contract,
+  `store: false` cannot regress, timeout, every documented transient/
+  permanent HTTP status, no raw error body/API key leakage) and
+  translation adapter (JA/PT-BR/skip, malformed output, cross-field
+  consistency), the D1 provider-usage counters (allow/block, atomic
+  rollover, never-unbounded-rows), the router's semantic-escalation
+  behavior (Gemini called only on `needsEscalation: true` with the
+  original request, zero calls on any Workers AI failure, no Gemini→
+  OpenAI fallback, maximum 2 providers/message), the config validator
+  (Gemini fields conditionally required only when enabled, never part of
+  the command path, `GEMINI_API_KEY` never in `AppConfig`), and a
+  webhook-integration suite (`telegram-webhook-gemini.test.ts`) covering
+  the full request flow — escalation success, escalation disabled,
+  missing Secret, budget exhaustion (minute/day), Gemini transient/
+  permanent/malformed failure, Workers AI failures never reaching
+  Gemini, the legacy OpenAI path regression, and Gemini-specific
+  privacy assertions (`store: false`, no API key/interaction ID/message
+  text in logs) — all against mocked/fake bindings, never a real
+  Workers AI/Gemini/OpenAI/Telegram call.
+- **Yujiによる手動作業:** None required by this phase. Registering
+  `GEMINI_API_KEY`, accepting Gemini Free Tier's data-treatment terms,
+  deploying this code, and any DeepL or Phase 9.2 work remain separate,
+  separately-approved future actions.
+- **次フェーズへ進む前の停止点:** Reached. Stop after CI is green — do
+  not proceed to any external setup (Secret registration, remote
+  migration, deploy), DeepL, or a new phase as part of this task.
 
 ---
 

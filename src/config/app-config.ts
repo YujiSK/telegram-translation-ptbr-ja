@@ -23,6 +23,19 @@ import { ConfigurationError, type Result } from "../shared/errors";
  * (the shape both `process.env`-like sources and a Worker's non-secret
  * `env` vars share) and returns a validated AppConfig or a
  * ConfigurationError.
+ *
+ * Phase 9.1B: the `workers-ai` variant additionally carries Gemini
+ * semantic-escalation config, itself a nested discriminated union on
+ * `geminiEscalationEnabled` — disabled requires nothing else Gemini-
+ * related (no `GEMINI_MODEL`, no budget config, no `GEMINI_API_KEY`);
+ * enabled requires `GEMINI_MODEL` plus both attempt-budget ceilings. This
+ * mirrors the `WORKERS_AI_MODEL`/`OPENAI_MODEL` conditional-requirement
+ * pattern above and keeps the command path (which never calls this
+ * function at all — see src/handlers/telegram-webhook.ts) untouched by
+ * any of it. `GEMINI_API_KEY` is a Secret and is deliberately never read
+ * here — see "Secret handling" in docs/security-and-privacy.md; it is
+ * read directly from `env` in the webhook's runtime wiring, only when
+ * `geminiEscalationEnabled` is `true`.
  */
 
 export type AppConfigInput = Readonly<Record<string, string | undefined>>;
@@ -36,11 +49,21 @@ interface BaseAppConfig {
   readonly maxTranslatableMessageLength: number;
 }
 
+/** Phase 9.1B: Gemini semantic-escalation config, nested inside the `workers-ai` AppConfig variant only — see the module doc comment. */
+export type GeminiEscalationConfig =
+  | { readonly geminiEscalationEnabled: false }
+  | {
+      readonly geminiEscalationEnabled: true;
+      readonly geminiModel: string;
+      readonly maxGeminiAttemptsPerMinute: number;
+      readonly maxGeminiAttemptsPerDay: number;
+    };
+
 export type AppConfig =
   | (BaseAppConfig & {
       readonly translationProvider: "workers-ai";
       readonly workersAiModel: string;
-    })
+    } & GeminiEscalationConfig)
   | (BaseAppConfig & { readonly translationProvider: "openai"; readonly openaiModel: string });
 
 const APP_ENVIRONMENTS: readonly AppEnvironment[] = ["development", "test", "production"];
@@ -69,6 +92,17 @@ function configError(key: string, detail: string): ConfigurationError {
 
 function fail(key: string, detail: string): Result<AppConfig, ConfigurationError> {
   return { ok: false, error: configError(key, detail) };
+}
+
+/** Strict literal `"true"`/`"false"` parsing only — never `Boolean(raw)`-style truthiness, which would silently accept any non-empty string as true. */
+function parseStrictBoolean(raw: string): boolean | undefined {
+  if (raw === "true") {
+    return true;
+  }
+  if (raw === "false") {
+    return false;
+  }
+  return undefined;
 }
 
 /** Shared by OPENAI_MODEL and WORKERS_AI_MODEL: non-empty, no leading/trailing whitespace — never silently normalized. */
@@ -114,6 +148,50 @@ export function validateAppConfig(input: AppConfigInput): Result<AppConfig, Conf
     if (!workersAiModel.ok) {
       return workersAiModel;
     }
+
+    const escalationEnabledRaw = input.GEMINI_ESCALATION_ENABLED;
+    if (escalationEnabledRaw === undefined || escalationEnabledRaw === "") {
+      return fail("GEMINI_ESCALATION_ENABLED", "is required");
+    }
+    const geminiEscalationEnabled = parseStrictBoolean(escalationEnabledRaw);
+    if (geminiEscalationEnabled === undefined) {
+      return fail("GEMINI_ESCALATION_ENABLED", 'must be exactly "true" or "false"');
+    }
+
+    if (!geminiEscalationEnabled) {
+      return {
+        ok: true,
+        value: {
+          environment: environmentRaw,
+          translationProvider: "workers-ai",
+          workersAiModel: workersAiModel.value,
+          maxTranslatableMessageLength,
+          geminiEscalationEnabled: false,
+        },
+      };
+    }
+
+    const geminiModel = readModelId(input, "GEMINI_MODEL");
+    if (!geminiModel.ok) {
+      return geminiModel;
+    }
+    const maxGeminiAttemptsPerMinuteRaw = input.MAX_GEMINI_ATTEMPTS_PER_MINUTE;
+    if (maxGeminiAttemptsPerMinuteRaw === undefined || maxGeminiAttemptsPerMinuteRaw === "") {
+      return fail("MAX_GEMINI_ATTEMPTS_PER_MINUTE", "is required");
+    }
+    const maxGeminiAttemptsPerMinute = parsePositiveInteger(maxGeminiAttemptsPerMinuteRaw);
+    if (maxGeminiAttemptsPerMinute === undefined) {
+      return fail("MAX_GEMINI_ATTEMPTS_PER_MINUTE", "must be a positive integer");
+    }
+    const maxGeminiAttemptsPerDayRaw = input.MAX_GEMINI_ATTEMPTS_PER_DAY;
+    if (maxGeminiAttemptsPerDayRaw === undefined || maxGeminiAttemptsPerDayRaw === "") {
+      return fail("MAX_GEMINI_ATTEMPTS_PER_DAY", "is required");
+    }
+    const maxGeminiAttemptsPerDay = parsePositiveInteger(maxGeminiAttemptsPerDayRaw);
+    if (maxGeminiAttemptsPerDay === undefined) {
+      return fail("MAX_GEMINI_ATTEMPTS_PER_DAY", "must be a positive integer");
+    }
+
     return {
       ok: true,
       value: {
@@ -121,6 +199,10 @@ export function validateAppConfig(input: AppConfigInput): Result<AppConfig, Conf
         translationProvider: "workers-ai",
         workersAiModel: workersAiModel.value,
         maxTranslatableMessageLength,
+        geminiEscalationEnabled: true,
+        geminiModel: geminiModel.value,
+        maxGeminiAttemptsPerMinute,
+        maxGeminiAttemptsPerDay,
       },
     };
   }

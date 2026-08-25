@@ -1,38 +1,38 @@
 # Data Model
 
-Status: **Phase 2, Phase 5, Phase 6, and Phase 7 schema implemented.**
+Status: **Phase 2, Phase 5, Phase 6, Phase 7, and Phase 9.1B schema
+implemented locally; Phase 8B applied migrations `0001`–`0004` to the
+remote database (see README.md, "Deployment state").**
 `migrations/0001_initial.sql` creates `allowed_chats`, `processed_updates`,
-and `speaker_profiles` for local development and tests. The remote D1
-database is provisioned and configured, and `0001_initial.sql` was
-applied remotely on 2026-08-14. `migrations/0002_speaker_memory.sql`
-(Phase 5) adds `observed_tone`/`observed_emoji_usage` to
-`speaker_profiles` and creates `speaker_preferences` and
-`translation_corrections`; `migrations/0003_commands.sql` (Phase 6)
-creates `bot_admins`; `migrations/0004_reliability.sql` (Phase 7) creates
-`rate_limit_counters` and `openai_daily_usage`. All three are verified
+and `speaker_profiles`. `migrations/0002_speaker_memory.sql` (Phase 5)
+adds `observed_tone`/`observed_emoji_usage` to `speaker_profiles` and
+creates `speaker_preferences` and `translation_corrections`;
+`migrations/0003_commands.sql` (Phase 6) creates `bot_admins`;
+`migrations/0004_reliability.sql` (Phase 7) creates
+`rate_limit_counters` and `openai_daily_usage`; `migrations/0005_provider_usage.sql`
+(Phase 9.1B) creates `provider_usage_counters`. All five are verified
 with `wrangler d1 migrations apply --local` and by the Workers Vitest
 test suite
-(`test/infrastructure/d1/{repositories,speaker-memory-repositories,bot-admins,forget-me,reliability-counters}.test.ts`),
-but **none** is applied to the remote database (that's Phase 8B). The
-remaining tables below stay plans for the later phases that own their
-behavior.
-
-**Phase 8A adds no new migration and no new table.** The production
-bootstrap endpoint (`POST /admin/bootstrap`, see docs/architecture.md,
-"Bootstrap endpoint") writes only to the two existing tables that
-already needed a production-setup write path — `bot_admins` (see below)
-and `allowed_chats` (see above) — via `INSERT ... ON CONFLICT` upserts,
-not new columns or a new table. `migrations/0005_*.sql` does not exist.
+(`test/infrastructure/d1/{repositories,speaker-memory-repositories,bot-admins,forget-me,reliability-counters,provider-usage-counters}.test.ts`).
+`0001`–`0004` were applied to the remote database during Phase 8B;
+`0005_provider_usage.sql` (Phase 9.1B) has **not** been applied remotely
+— it exists in source and is verified locally/in CI only, per that
+task's explicit scope (no external side effect authorized). Applying it
+remotely requires the same explicit approval as any other external
+action (see `docs/operations.md`).
 
 **No message content anywhere in this schema, confirmed through Phase
-7:** neither `rate_limit_counters` nor `openai_daily_usage` — nor any
-table added in any migration — stores a message body, a translated
-string, a full OpenAI prompt, or a raw OpenAI/Telegram response.
+7 and re-verified for Phase 9.1B's addition:** neither
+`rate_limit_counters`, `openai_daily_usage`, nor `provider_usage_counters`
+— nor any table added in any migration — stores a message body, a
+translated string, a full prompt, or a raw provider response.
 `rate_limit_counters.scope_id` is a Telegram chat ID (an identifier, not
-content); every other column in both new tables is a window/day
-identifier, a count, or a timestamp. This is asserted directly by
-`test/handlers/telegram-webhook-security.test.ts`, which inspects every
-table's live `CREATE TABLE` schema in `sqlite_master` and fails if any
+content); `provider_usage_counters.scope_id` is always `0` (a global
+scope, not even a chat ID); every other column in these tables is a
+provider/scope/window/day identifier, a count, or a timestamp. This is
+asserted directly by `test/handlers/telegram-webhook-security.test.ts`,
+which inspects every table's live `CREATE TABLE` schema in `sqlite_master`
+and fails if any
 table gains a column shaped like message/translation/response content.
 
 General privacy rule for every table below: **never store message text,
@@ -281,6 +281,49 @@ limit.
 - **Retention:** indefinite, but exactly one row, always.
 - **Index candidates:** none needed (single-row table).
 
+## `provider_usage_counters`
+
+**Implementation status:** Phase 9.1B schema implemented
+(`migrations/0005_provider_usage.sql`); read/written via
+`consumeGeminiMinuteAttemptLimit`/`consumeGeminiDailyAttemptLimit` in
+`src/infrastructure/d1/provider-usage-counters.ts`.
+
+**Purpose:** A generic, provider-aware analog of `rate_limit_counters` —
+backs the app-side Gemini semantic-escalation attempt ceilings (global
+minute + global daily), deliberately a new table rather than a rewrite
+of the OpenAI-specific `rate_limit_counters`/`openai_daily_usage` above,
+which remain unchanged and still back the legacy OpenAI attempt limits
+(see `docs/phase9-provider-plan.md`, "Why not rewrite existing OpenAI
+tables").
+
+- **Implemented primary key:** `(provider, scope_type, scope_id)` — one
+  row per scope, never one row per request or per time window, exactly
+  like `rate_limit_counters`. A window rollover overwrites the existing
+  row's `window_id` and resets `attempt_count` in place.
+- **Implemented columns:** `provider`, `scope_type`, `scope_id` (always
+  `0` for the two global scopes Phase 9.1B uses — there is no per-chat
+  Gemini budget in this phase), `window_id` (an integer minute- or
+  day-bucket, computed by `src/shared/time-windows.ts`), `attempt_count`,
+  `updated_at`.
+- **Implemented constraint:** both `provider` and `scope_type` are
+  tightly `CHECK`-constrained to the values Phase 9.1B actually uses —
+  `provider IN ('gemini')`, `scope_type IN ('global_minute',
+'global_day')` — and `attempt_count >= 0`. Extending either `CHECK` is
+  a future migration, not a speculative allowance added now.
+- **Must not store:** message content, prompts, or anything beyond the
+  provider name, a scope/window identifier, and a count.
+- **Atomicity:** the same UPSERT-with-`RETURNING` pattern as
+  `rate_limit_counters`/`openai_daily_usage` — never a separate read
+  then write.
+- **Retention:** indefinite, but bounded in size by design — at most one
+  row per `(provider, scope_type, scope_id)` combination Phase 9.1B
+  actually uses (two rows total: `gemini`/`global_minute` and
+  `gemini`/`global_day`), regardless of how many escalations or how much
+  time passes.
+- **Index candidates:** primary key lookup only (a two-row table for as
+  long as Gemini remains the only provider with app-side budget
+  tracking).
+
 ## `bot_admins`
 
 **Implementation status:** Phase 6 schema implemented
@@ -500,12 +543,42 @@ Recorded here so they don't have to be re-derived from the code later:
   `SETUP_ADMIN_SECRET`, real admin ID, or real chat ID); doing so is a
   Phase 8B action requiring its own separate approval.
 
+## Phase 9.1B provider-usage-schema design decisions (summary)
+
+Recorded here so they don't have to be re-derived from the migration or
+code later:
+
+- **A new table, not a rewrite of Phase 7's OpenAI-specific counters.**
+  `rate_limit_counters`/`openai_daily_usage` keep backing the legacy
+  OpenAI attempt limits unchanged; `provider_usage_counters` is a
+  parallel, generic table for Gemini's app-side budget. Consolidating
+  them is deferred to a future phase, only if it turns out to be
+  worthwhile — not attempted now, per the task's own explicit scope.
+- **Global scope only, no per-chat Gemini budget.** Unlike
+  `rate_limit_counters`' per-chat `chat_openai` scope, Gemini's budget is
+  a single whole-bot ceiling (mirroring `openai_daily_usage`'s
+  single-row-global design) — Phase 9.1B has no product need for a
+  per-chat Gemini limit yet.
+- **`provider`/`scope_type` are tightly `CHECK`-constrained to only the
+  values actually used**, not speculatively widened for hypothetical
+  future providers or scopes — matching the same discipline
+  `rate_limit_counters.scope_type`'s `CHECK` already established in
+  Phase 7.
+- **This migration (`0005_provider_usage.sql`) has not been applied to
+  the remote database** — only verified locally
+  (`wrangler d1 migrations apply --local`, plus a direct
+  `wrangler d1 execute --local` check of the UPSERT statement) and by
+  the Workers Vitest suite. Applying it remotely requires the same
+  explicit approval as any other external action — see
+  `docs/operations.md`.
+
 ## Migration policy
 
 The first migration is `migrations/0001_initial.sql`; the second is
 `migrations/0002_speaker_memory.sql` (Phase 5); the third is
 `migrations/0003_commands.sql` (Phase 6); the fourth is
-`migrations/0004_reliability.sql` (Phase 7). Future migrations are
+`migrations/0004_reliability.sql` (Phase 7); the fifth is
+`migrations/0005_provider_usage.sql` (Phase 9.1B). Future migrations are
 created with:
 
 ```sh
@@ -516,8 +589,9 @@ This creates a numbered `.sql` file per Cloudflare's D1 migration workflow
 (https://developers.cloudflare.com/d1/reference/migrations/). Migrations
 are applied with `wrangler d1 migrations apply` (`--local` for local dev,
 `--remote` for the deployed database) — not run manually against
-production. `0002_speaker_memory.sql`, `0003_commands.sql`, and
-`0004_reliability.sql` have each been applied and tested with `--local`
-only (in order, `0001` → `0002` → `0003` → `0004`, applying cleanly as a
-sequence); a `--remote` apply requires the same explicit approval as any
-other Phase 8 action.
+production. `0002_speaker_memory.sql`, `0003_commands.sql`,
+`0004_reliability.sql`, and `0005_provider_usage.sql` have each been
+applied and tested with `--local` only (in order, `0001` → `0002` →
+`0003` → `0004` → `0005`, applying cleanly as a sequence); a `--remote`
+apply requires the same explicit approval as any other external-action
+approval unit (see `docs/operations.md`).

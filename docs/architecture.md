@@ -3,12 +3,14 @@
 Status: **Foundation, domain, D1 repository layer, the Telegram webhook
 boundary, OpenAI translation, speaker memory, the command surface,
 reliability/security hardening, Phase 8A deployment-preparation tooling,
-and — Phase 9.1A — a vendor-independent translation-provider router with
-a Cloudflare Workers AI routine adapter (now the default provider,
-implemented and tested locally/in CI only, not deployed) are
-implemented.** See "Translation provider router (Phase 9.1A)" below for
-the router/adapter design; the rest of this document (written before
-Phase 9.1A) still describes the underlying webhook/D1/command
+a vendor-independent translation-provider router with a Cloudflare
+Workers AI routine adapter (Phase 9.1A, now the default provider), and a
+Gemini semantic-escalation adapter (Phase 9.1B) are implemented — all
+locally/in CI only, not deployed; Gemini escalation is additionally
+disabled by default (`GEMINI_ESCALATION_ENABLED=false`) even once
+deployed.** See "Translation provider router (Phase 9.1A / Phase 9.1B)"
+below for the router/adapter design; the rest of this document (written
+before Phase 9.1A) still describes the underlying webhook/D1/command
 architecture accurately, with "OpenAI" in the sections below now
 specifically meaning the legacy `TRANSLATION_PROVIDER=openai` path unless
 otherwise noted. `POST /telegram/webhook` verifies the
@@ -703,7 +705,7 @@ existing generic 404, exactly like every other route in this Worker; no
 new 405 behavior was introduced, to keep routing behavior uniform across
 the whole Worker.
 
-## Translation provider router (Phase 9.1A)
+## Translation provider router (Phase 9.1A / Phase 9.1B)
 
 **Implemented, local/CI-only — not deployed.** `src/handlers/telegram-webhook.ts`
 no longer calls `src/infrastructure/openai/translate.ts` directly for the
@@ -725,18 +727,27 @@ shape regardless of which provider is selected.
   `ProviderTranslationCandidate` (`src/infrastructure/translation/provider.ts`):
   `{ outcome, needsEscalation, escalationReason }`. When
   `needsEscalation` is `false`, the router unwraps `outcome` unchanged.
-  When it is `true`, the router throws `EscalationRequiredError`
-  (`src/shared/errors.ts`) instead of surfacing the provisional
-  `outcome` or calling any other provider — there is no automatic
-  Workers AI → OpenAI (or Gemini) fallback, by design (see
-  `docs/phase9-provider-plan.md`, "bounded fan-out policy").
+  When it is `true`: if a `gemini` boundary was supplied to the router
+  (Phase 9.1B, `GEMINI_ESCALATION_ENABLED=true`), the router calls
+  Gemini exactly once with the **original** request — see "Gemini
+  semantic escalation adapter" below; otherwise (Phase 9.1A behavior,
+  still the default — `GEMINI_ESCALATION_ENABLED=false`) it throws
+  `EscalationRequiredError` (`src/shared/errors.ts`) instead of
+  surfacing the provisional `outcome`. There is no automatic Workers AI
+  → OpenAI fallback in either case, by design (see
+  `docs/phase9-provider-plan.md`, "bounded fan-out policy") — "is
+  `gemini` configured" is the router's only escalation-availability
+  signal, so the router itself never reads config.
 - **`openai` mode (implemented, legacy/compatibility path):** calls the
   existing Phase 4/5 `src/infrastructure/openai/translate.ts` boundary
   unchanged — behavior, tests, and prompt (`translation-v2.ts`) are
-  identical to before this phase.
-- **No mode calls more than one provider.** `test/infrastructure/translation/router.test.ts`
+  identical to before this phase. Never calls Workers AI or Gemini.
+- **No mode calls more than 2 providers per message.** `workers-ai` mode
+  calls at most Workers AI, then optionally Gemini; `openai` mode calls
+  exactly OpenAI. `test/infrastructure/translation/router.test.ts`
   asserts this directly for both modes, including the escalation-required
-  case.
+  and semantic-escalation-to-Gemini cases, and a dedicated "maximum
+  logical providers per message is 2" test.
 
 ### Workers AI adapter
 
@@ -821,6 +832,82 @@ with `needsEscalation`/`escalationReason`, and its own prompt version
 constant (`TRANSLATION_WORKERS_AI_PROMPT_VERSION`), independent of the
 OpenAI prompt's versioning.
 
+### Gemini semantic escalation adapter (Phase 9.1B)
+
+**Implemented, local/CI-only — not deployed; disabled by default
+(`GEMINI_ESCALATION_ENABLED=false`).** `src/infrastructure/gemini/client.ts`'s
+`callGeminiInteraction` makes a single `fetch` call to the Gemini
+Interactions API (`POST https://generativelanguage.googleapis.com/v1/interactions`,
+`x-goog-api-key` header, never a query parameter), bounded by a real
+`AbortSignal` timeout, with no automatic retry — mirroring the Workers
+AI/OpenAI adapters' one-logical-attempt-per-delivery discipline. Unlike
+the Workers AI adapter, this project has no generated Cloudflare type
+for Gemini's contract, and outbound access to `ai.google.dev` was
+blocked in the environment this was implemented in — the exact request/
+response shape (`system_instruction`/`input` as plain strings,
+`response_format: { type: "text", mime_type: "application/json", schema
+}`, and extracting model output from `steps[].content[].text`) is a
+documented best-effort interpretation of the task's own stated
+operational facts, flagged for re-verification against live Google
+documentation before any real Gemini call. `callGeminiInteraction`
+unconditionally force-sets `store: false` on every request body — after
+the caller's own body is spread in, so no caller (including a future
+one) can omit or override it — since the Interactions API stores
+interactions by default and this bot is intentionally stateless at the
+provider level: no `previous_interaction_id`, no background mode, no
+streaming, no tools/grounding.
+
+**Semantic escalation vs. infrastructure failure.** Gemini is called
+only when Workers AI's structured output _itself_ reports
+`needsEscalation: true` — a successful, validated Workers AI response
+that just needs a stronger second opinion. It is never called as a
+fallback for a Workers AI infrastructure/availability failure (timeout,
+network error, 429/5xx, invalid model, malformed output) — those all
+throw before the router ever reads `needsEscalation` (see
+`src/infrastructure/translation/router.ts`, `translateViaWorkersAi`),
+so Gemini sees zero calls in every one of those cases.
+`src/infrastructure/gemini/translate.ts` receives the **original**
+`TranslationRequest` — never Workers AI's provisional `translatedText`,
+outcome, or free-form reasoning — so Gemini forms an independent second
+opinion rather than anchoring to a low-confidence first attempt. Its
+output contract has no escalation concept of its own: it reuses
+`translation-v1.ts`'s `TRANSLATION_JSON_SCHEMA` directly (via
+`src/prompts/translation-gemini.ts`, which also reuses
+`translation-shared.ts`'s provider-neutral instructional text) and
+returns a plain `TranslationOutcome`, exactly like the OpenAI adapter —
+the router treats Gemini as the final semantic-quality layer, not
+another `TranslationProvider` that could itself request further
+escalation.
+
+**Error classification** mirrors the Workers AI adapter's reworked
+policy directly, but with real HTTP status codes available (no
+message-text pattern-matching needed): `400`/`401`/`403`/`404`/`422` is
+`PermanentUpstreamError(service: "gemini")`; `408`/`429`/5xx and any
+network/runtime failure before a response was received is
+`TransientUpstreamError`; a successful HTTP response with a non-JSON or
+otherwise malformed body is permanent. A malformed-but-successfully-
+returned structured output (missing `steps[].content[].text`, invalid
+JSON, a cross-field-inconsistent payload) is validated exactly like the
+OpenAI/Workers AI adapters and is likewise always permanent, never
+retried.
+
+**App-side attempt budget.** `src/infrastructure/d1/provider-usage-counters.ts`
+(`migrations/0005_provider_usage.sql`) tracks a global (not per-chat)
+Gemini minute/day attempt count, mirroring Phase 7's
+`rate_limit_counters`/`openai_daily_usage` atomic-UPSERT pattern
+exactly. The webhook's `reserveGeminiAttempt` closure — captured so
+`infrastructure/translation/router.ts` never imports D1 — checks
+`GEMINI_API_KEY` presence first (before any D1 access), then reserves
+the minute budget, then the daily budget, throwing
+`RateLimitExceededError`/`UsageLimitExceededError` if either is
+exhausted; the router calls this closure via `beforeGeminiAttempt`,
+strictly before calling Gemini, so a missing key or exhausted budget
+means Gemini is never actually called. Because this check is lazy
+(invoked only when Workers AI actually requests escalation, not
+whenever escalation is merely enabled), a routine, non-escalating
+Workers AI translation never requires `GEMINI_API_KEY` — even with
+`GEMINI_ESCALATION_ENABLED=true` and Gemini setup incomplete.
+
 ### Webhook integration
 
 `src/handlers/telegram-webhook.ts`'s provider-conditional branch moves
@@ -829,17 +916,30 @@ presence check entirely inside the `openai`-mode branch — `workers-ai`
 mode never requires `OPENAI_API_KEY` and never consumes the Phase 7
 OpenAI-specific `rate_limit_counters`/`openai_daily_usage` counters (it
 is still subject to the provider-agnostic per-chat handled-update limit,
-same as any other message). A new `catch (error instanceof
+same as any other message). A `catch (error instanceof
 EscalationRequiredError)` branch responds 200, outcome
 `ignored:escalation-unavailable`, and **keeps** the dedupe reservation
 (this is a safe, expected outcome, not a transient failure — a
 redelivery of the same update would reach the same escalation-required
-result again, so releasing the reservation would gain nothing). Dedupe
-and speaker-memory read/write ordering are otherwise unchanged from
-Phase 4–7 regardless of provider. Relevant structured log lines include
-`provider: config.translationProvider` — never any other provider
--identifying detail (see `docs/security-and-privacy.md`, "Log
-minimization").
+result again, so releasing the reservation would gain nothing) — reached
+when Gemini escalation is disabled or not configured. Phase 9.1B: in
+`workers-ai` mode, a `RateLimitExceededError`/`UsageLimitExceededError`
+from the Gemini budget closure is unambiguous (the OpenAI reservation
+closure is never constructed in this mode) and is likewise mapped to
+200 `ignored:escalation-unavailable` (dedupe kept), logged with
+`provider: "gemini"` and `limitType: "gemini-minute"`/`"gemini-daily"` —
+distinct from the legacy `openai`-mode `ignored:rate-limited`/
+`ignored:usage-limit` outcomes, which are unaffected. Dedupe and
+speaker-memory read/write ordering are otherwise unchanged from Phase
+4–7 regardless of provider — including on a Gemini-escalated success,
+where the best-effort observed-style write uses Gemini's final
+`styleSignals`, never Workers AI's provisional ones (`translateAndReply`
+itself needed no change — it only ever sees the router's single final
+`TranslationOutcome`). The success log line's `provider` field reflects
+the **actual final provider** (`workers-ai`, `openai`, or `gemini` on a
+semantic escalation) via the router's `onFinalProviderSelected`
+callback — never a raw model ID or other provider-identifying detail
+(see `docs/security-and-privacy.md`, "Log minimization").
 
 ## What this Worker does _not_ do (see `docs/implementation-plan.md`)
 
