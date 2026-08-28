@@ -759,12 +759,21 @@ synthetic fake instead of the real binding — **no test in this
 repository ever performs a real `env.AI.run()` call**; `vitest.config.ts`
 also sets `remoteBindings: false` so the test pool itself never attempts
 a live Cloudflare connection for the `AI` binding. The model
-(`@cf/zai-org/glm-4.7-flash`) is passed in from `WORKERS_AI_MODEL`
+(`@cf/meta/llama-3.1-8b-instruct-fast`) is passed in from `WORKERS_AI_MODEL`
 config — never hard-coded into `provider.ts`, `translate.ts`, or any
 domain/application type. A real `AbortSignal`-based timeout bounds each
 call; there is no automatic retry beyond the one logical Workers AI
 attempt per Telegram delivery (matching `docs/project-rules.md` rules
 7–8 — the existing OpenAI retry budget is unrelated and unchanged).
+
+**Routine-model latency validation (2026-08-28):** live synthetic Workers AI
+checks showed `@cf/zai-org/glm-4.7-flash` taking roughly 22–30 seconds for
+short JA/PT-BR translation even with `reasoning_effort: "low"`, which is
+not suitable for an interactive family-chat routine path. The same
+structured-output contract with `@cf/meta/llama-3.1-8b-instruct-fast`
+returned valid JA->PT-BR and PT-BR->JA results in roughly 0.6–1.2 seconds.
+The production default therefore moved to the Llama fast model; Gemini
+remains the semantic-escalation provider and OpenAI remains legacy-only.
 
 **Error classification** (`classifyWorkersAiError`, best-effort — the
 generated Workers AI binding type exposes no structured error shape, only

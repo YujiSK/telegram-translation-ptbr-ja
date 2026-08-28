@@ -589,7 +589,7 @@ the OpenAI adapter's defense-in-depth style), and
 prompt content extracted from the existing OpenAI prompt, reused
 byte-identically, plus a Workers AI-specific JSON Schema and prompt
 version). `TRANSLATION_PROVIDER` (`workers-ai` | `openai`, new) and
-`WORKERS_AI_MODEL` (new, `@cf/zai-org/glm-4.7-flash`) are non-secret
+`WORKERS_AI_MODEL` (new; current production default `@cf/meta/llama-3.1-8b-instruct-fast`) are non-secret
 `wrangler.jsonc` vars validated by a rewritten discriminated-union
 `validateAppConfig()`; `OPENAI_MODEL` is retained, required only in
 `openai` mode. The `AI` binding was added to `wrangler.jsonc` and
@@ -603,6 +603,15 @@ gained a `catch (error instanceof EscalationRequiredError)` branch (200,
 `docs/architecture.md`, "Translation provider router (Phase 9.1A)", for
 the full design and `docs/phase9-provider-plan.md`, "Phase 9.1A
 implementation record", for how this maps to the original plan.
+
+**2026-08-28 routine-model switch:** live synthetic checks found
+`@cf/zai-org/glm-4.7-flash` too slow for routine chat translation (roughly
+22–30s for short messages, including `reasoning_effort: "low"`).
+`@cf/meta/llama-3.1-8b-instruct-fast` passed the same structured-output
+contract in roughly 0.6–1.2s for JA/PT-BR samples, so `WORKERS_AI_MODEL`
+was switched to the Llama fast model without changing router semantics.
+Gemini remains escalation-only; no Workers AI failure -> Gemini fallback
+was introduced.
 
 **Review hardening (post-completion, same phase):** a follow-up review
 pass verified the Workers AI adapter's request/response contract and
