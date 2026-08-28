@@ -102,14 +102,14 @@ describe("createWorkersAiTranslationProvider — direct-binding request contract
     expect(typeof jsonSchema.name).toBe("string");
   });
 
-  it("sends exactly a developer message followed by a user message, matching the generated ChatCompletionMessageParam contract", async () => {
+  it("sends exactly a system message followed by a user message for live GLM runtime compatibility", async () => {
     const { provider, run } = providerWithResponse(chatCompletionResponse(VALID_JA_PAYLOAD));
 
     await provider.translate(request("こんにちは"));
 
     const inputs = run.mock.calls[0]?.[1] as { messages: { role: string; content: string }[] };
     expect(inputs.messages).toHaveLength(2);
-    expect(inputs.messages[0]?.role).toBe("developer");
+    expect(inputs.messages[0]?.role).toBe("system");
     expect(inputs.messages[1]?.role).toBe("user");
   });
 });

@@ -66,12 +66,13 @@ json_schema: { name, schema, strict } }` and a response envelope of
   annotates the request's `response_format` value with the generated
   `ResponseFormatJSONSchema` type, so `npm run typecheck` fails if the
   contract ever drifts. See `docs/architecture.md`, "Workers AI adapter".
-- **Message role:** `"developer"` confirmed correct and kept — the
-  generated `ChatCompletionMessageParam` type explicitly lists
-  `DeveloperMessage` as a supported direct-binding role for this model,
-  so this was never an OpenAI-compatibility assumption. Documented with
-  a citing comment and a dedicated regression test in
-  `test/prompts/translation-workers-ai.test.ts`.
+- **Message role:** the generated type accepts both `developer` and `system`,
+  but live `@cf/zai-org/glm-4.7-flash` inference on 2026-08-28 showed that
+  `developer` instructions were not reliably applied: the model ignored the
+  JA<->PT-BR policy and translated Japanese to English, producing a
+  cross-field-invalid result. The Workers AI adapter therefore uses
+  `system` for its control instructions; this is guarded by prompt/provider
+  tests and should only be changed after a live compatibility re-check.
 - **Call-layer error classification (the actual behavior change):**
   `classifyWorkersAiError` (`src/infrastructure/workers-ai/client.ts`)
   used to default an unrecognized failure to permanent (fail closed).

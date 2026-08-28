@@ -27,7 +27,7 @@ const ESCALATION_INSTRUCTIONS = `Escalation decision: after deciding whether and
 - "low-confidence": you are not otherwise confident the translation (or the skip decision) is accurate.
 When none of these apply, set needsEscalation to false and escalationReason to "none". Never explain your escalation reasoning in translatedText or anywhere outside the escalationReason field — escalationReason must be exactly one of the fixed values above, never free-form text.`;
 
-const DEVELOPER_INSTRUCTIONS = `${TRANSLATION_CORE_INSTRUCTIONS}
+const SYSTEM_INSTRUCTIONS = `${TRANSLATION_CORE_INSTRUCTIONS}
 
 ${ESCALATION_INSTRUCTIONS}
 
@@ -36,19 +36,18 @@ Respond using only the structured output format you have been given. Do not incl
 export type TranslationPromptDataWorkersAi = TranslationPromptDataShared;
 
 /**
- * Phase 9.1A review hardening: `role: "developer"` is verified, not
- * assumed OpenAI-compatible — this repo's generated
- * `worker-configuration.d.ts` lists `DeveloperMessage` (`{ role:
- * "developer", content, name? }`) as one of the six members of
- * `ChatCompletionMessageParam`, the message type
- * `Base_Ai_Cf_Zai_Org_Glm_4_7_Flash.inputs` (`ChatCompletionsMessagesInput.messages`)
- * actually accepts for direct-binding calls to this model. Kept as
- * `"developer"` rather than changed to `"system"` for this reason — see
- * `test/prompts/translation-workers-ai.test.ts`, "role compatibility"
- * for the regression test.
+ * Workers AI runtime compatibility note: although the generated
+ * `ChatCompletionMessageParam` type accepts `role: "developer"`,
+ * live `@cf/zai-org/glm-4.7-flash` inference did not reliably apply
+ * developer-role instructions. A live synthetic regression check on
+ * 2026-08-28 showed the model ignoring the JA<->PT-BR policy and
+ * translating Japanese to English, which then failed our cross-field
+ * validator. The same prompt sent as `role: "system"` produced the
+ * expected PT-BR result. Keep Workers AI instructions on the system
+ * role unless Cloudflare/model behavior is re-verified in live inference.
  */
 export interface WorkersAiChatMessage {
-  readonly role: "developer" | "user";
+  readonly role: "system" | "user";
   readonly content: string;
 }
 
@@ -58,7 +57,7 @@ export function buildTranslationInputWorkersAi(
   const userContentLines = buildTranslationUserContentLines(data);
 
   return [
-    { role: "developer", content: DEVELOPER_INSTRUCTIONS },
+    { role: "system", content: SYSTEM_INSTRUCTIONS },
     { role: "user", content: userContentLines.join("\n") },
   ];
 }

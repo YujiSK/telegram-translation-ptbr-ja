@@ -805,9 +805,12 @@ explicitly annotated with the generated `ResponseFormatJSONSchema` type
 in `translate.ts`, so `npm run typecheck` fails if this ever drifts;
 `test/infrastructure/workers-ai/translate.test.ts` adds a matching
 runtime assertion on the exact object sent to `binding.run()`. The
-message role `"developer"` was likewise confirmed (not assumed) against
-the generated `ChatCompletionMessageParam` type, which explicitly lists
-`DeveloperMessage` as a supported role for this model's direct binding.
+generated `ChatCompletionMessageParam` type accepts `developer`, but
+live inference showed that `@cf/zai-org/glm-4.7-flash` did not reliably
+apply control instructions from that role. The adapter therefore uses
+`system` for Workers AI control instructions; a live synthetic check on
+2026-08-28 confirmed the same prompt then preserved the intended
+JA<->PT-BR routing.
 
 **Structured output validation** (`src/infrastructure/workers-ai/translate.ts`)
 mirrors the existing OpenAI adapter's defense-in-depth manual validation:
