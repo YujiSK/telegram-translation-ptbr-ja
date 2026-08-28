@@ -219,7 +219,25 @@ a future call site could accidentally widen.
   actual final provider that produced the outcome, e.g. `"gemini"` on a
   successful semantic escalation, not just the configured router mode)
   and `escalationReason` (fixed 6-value enum, e.g. `"ambiguous-context"`;
-  never free text).
+  never free text). **Pilot incident diagnostics (Phase 9):** an upstream
+  service error may additionally carry `stage` (fixed 6-value enum
+  naming which call-pipeline step failed — `"request"`, `"http"`,
+  `"interaction-status"`, `"response-envelope"`, `"structured-output"`,
+  `"logical-validation"` — never response content),
+  `httpStatus` (a bare numeric HTTP status, never the response body),
+  `interactionStatus` (Gemini's top-level interaction `status`,
+  restricted to the closed set `"completed"`/`"in_progress"`/
+  `"requires_action"`/`"failed"`/`"cancelled"`/`"incomplete"`, plus the
+  sentinels `"missing"`/`"unrecognized"` for an absent or
+  out-of-enum value — an arbitrary/unvalidated status string can never
+  reach a log line), `endpointVersion` (a fixed literal like `"v1"`,
+  never a full URL), and `model` (the configured, non-secret model id,
+  e.g. `GEMINI_MODEL`'s value — never a model-generated string). Set by
+  `src/infrastructure/gemini/{client,translate}.ts` at the exact call
+  site that detects the failure (see `UpstreamServiceErrorOptions` in
+  `src/shared/errors.ts`) and surfaced only by
+  `src/handlers/telegram-webhook.ts`'s existing catch-all — no new log
+  line, no change to which outcomes are logged.
 - Structured logs must never include: message text (source or
   translated), reply-context text, full command text, correction
   source/target terms, display names, full OpenAI/Workers AI/Gemini
@@ -232,7 +250,10 @@ a future call site could accidentally widen.
   sanctioned way to turn a caught error into log fields — it extracts
   only `error.name` (never `.message`) and a type-guard-checked
   `service` (now including `"workers-ai"` and `"gemini"`), never an
-  unchecked cast.
+  unchecked cast — and, as of the pilot incident diagnostics above, the
+  same type-guard discipline for `stage`/`httpStatus`/`interactionStatus`,
+  so a value outside each field's closed set is silently dropped rather
+  than logged.
 - `src/handlers/telegram-webhook.ts`'s `finish()` helper logs exactly one
   structured event per request (the single final outcome), not a
   multi-log-line-per-request pattern.

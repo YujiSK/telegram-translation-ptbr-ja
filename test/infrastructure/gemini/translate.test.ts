@@ -3,7 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { SpeakerIdentity } from "../../../src/domain/speaker";
 import type { TranslationRequest } from "../../../src/domain/translation";
 import { createGeminiTranslationBoundary } from "../../../src/infrastructure/gemini/translate";
-import { PermanentUpstreamError, TransientUpstreamError } from "../../../src/shared/errors";
+import {
+  PermanentUpstreamError,
+  TransientUpstreamError,
+  UpstreamServiceError,
+} from "../../../src/shared/errors";
 
 /**
  * `fetch` is never called against the real Gemini API in this file —
@@ -32,6 +36,21 @@ function interactionEnvelope(payload: unknown): Record<string, unknown> {
     status: "completed",
     steps: [{ type: "model_output", content: [{ type: "text", text: JSON.stringify(payload) }] }],
   };
+}
+
+/** Awaits a rejecting promise and returns its `UpstreamServiceError`, properly narrowed (no unsafe cast) — a plain `.catch()` can't narrow away `boundary.translate`'s `TranslationOutcome` success type. */
+async function captureUpstreamServiceError(
+  promise: Promise<unknown>,
+): Promise<UpstreamServiceError> {
+  try {
+    await promise;
+  } catch (error) {
+    if (error instanceof UpstreamServiceError) {
+      return error;
+    }
+    throw error;
+  }
+  throw new Error("expected the promise to reject with an UpstreamServiceError");
 }
 
 function boundaryWithResponse(response: Response) {
@@ -343,6 +362,88 @@ describe("createGeminiTranslationBoundary — interaction completion status", ()
       );
     },
   );
+});
+
+describe("createGeminiTranslationBoundary — interaction-status diagnostic metadata (pilot incident diagnostics)", () => {
+  it.each(["incomplete", "requires_action"] as const)(
+    "tags status=%s as stage=interaction-status with the matching interactionStatus",
+    async (status) => {
+      const { boundary } = boundaryWithResponse(
+        jsonResponse({ ...interactionEnvelope(VALID_JA_PAYLOAD), status }),
+      );
+      const error = await captureUpstreamServiceError(boundary.translate(request("hello")));
+      expect(error.stage).toBe("interaction-status");
+      expect(error.interactionStatus).toBe(status);
+    },
+  );
+
+  it.each(["in_progress", "failed", "cancelled"] as const)(
+    "tags status=%s as stage=interaction-status with the matching interactionStatus",
+    async (status) => {
+      const { boundary } = boundaryWithResponse(
+        jsonResponse({ ...interactionEnvelope(VALID_JA_PAYLOAD), status }),
+      );
+      const error = await captureUpstreamServiceError(boundary.translate(request("hello")));
+      expect(error.stage).toBe("interaction-status");
+      expect(error.interactionStatus).toBe(status);
+    },
+  );
+
+  it("tags a missing status as interactionStatus='missing'", async () => {
+    const envelope = interactionEnvelope(VALID_JA_PAYLOAD);
+    delete envelope.status;
+    const { boundary } = boundaryWithResponse(jsonResponse(envelope));
+
+    const error = await captureUpstreamServiceError(boundary.translate(request("hello")));
+
+    expect(error.stage).toBe("interaction-status");
+    expect(error.interactionStatus).toBe("missing");
+  });
+
+  it("tags an unrecognized status string as interactionStatus='unrecognized', never the raw value", async () => {
+    const identifiableStatus = "synthetic-identifiable-unrecognized-status-7c2d";
+    const envelope = { ...interactionEnvelope(VALID_JA_PAYLOAD), status: identifiableStatus };
+    const { boundary } = boundaryWithResponse(jsonResponse(envelope));
+
+    const error = await captureUpstreamServiceError(boundary.translate(request("hello")));
+
+    expect(error.stage).toBe("interaction-status");
+    expect(error.interactionStatus).toBe("unrecognized");
+    expect(error.interactionStatus).not.toBe(identifiableStatus);
+  });
+});
+
+describe("createGeminiTranslationBoundary — structured-output/logical-validation stage tagging (pilot incident diagnostics)", () => {
+  it("tags invalid JSON model output as stage=structured-output", async () => {
+    const envelope = {
+      status: "completed",
+      steps: [{ type: "model_output", content: [{ type: "text", text: "not valid json" }] }],
+    };
+    const { boundary } = boundaryWithResponse(jsonResponse(envelope));
+
+    const error = await captureUpstreamServiceError(boundary.translate(request("hello")));
+
+    expect(error).toBeInstanceOf(PermanentUpstreamError);
+    expect(error.stage).toBe("structured-output");
+  });
+
+  it("tags a cross-field-inconsistent payload as stage=logical-validation", async () => {
+    const inconsistentPayload = {
+      detectedLanguage: "ja",
+      action: "skip",
+      targetLanguage: null,
+      translatedText: null,
+      styleSignals: null,
+    };
+    const { boundary } = boundaryWithResponse(
+      jsonResponse(interactionEnvelope(inconsistentPayload)),
+    );
+
+    const error = await captureUpstreamServiceError(boundary.translate(request("hello")));
+
+    expect(error).toBeInstanceOf(PermanentUpstreamError);
+    expect(error.stage).toBe("logical-validation");
+  });
 });
 
 describe("createGeminiTranslationBoundary — upstream failures propagate unchanged", () => {

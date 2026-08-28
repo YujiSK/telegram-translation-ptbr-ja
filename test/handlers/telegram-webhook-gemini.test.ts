@@ -593,6 +593,87 @@ describe("POST /telegram/webhook — Gemini call-layer failures", () => {
   });
 });
 
+describe("POST /telegram/webhook — Gemini failure diagnostics (pilot incident diagnostics)", () => {
+  it("logs stage=http, httpStatus, endpointVersion, and model for a transient Gemini HTTP failure", async () => {
+    await allowlistChat();
+    mockFetchDispatch({
+      gemini: () => Promise.resolve(jsonResponse({ error: { message: "server error" } }, 503)),
+    });
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const updateId = 981000065;
+
+    await callWorker(
+      webhookRequest(buildUpdate({ updateId })),
+      testEnv({
+        AI: workersAiAlwaysReturns(workersAiChatCompletionResponse(WORKERS_AI_ESCALATION_PAYLOAD)),
+      }),
+    );
+
+    const lastLine = consoleSpy.mock.calls.at(-1)?.[0] as string;
+    const parsed = JSON.parse(lastLine) as Record<string, unknown>;
+    expect(parsed.service).toBe("gemini");
+    expect(parsed.stage).toBe("http");
+    expect(parsed.httpStatus).toBe(503);
+    expect(parsed.endpointVersion).toBe("v1");
+    expect(parsed.model).toBe("gemini-3.5-flash-lite");
+    consoleSpy.mockRestore();
+  });
+
+  it("logs stage=interaction-status and interactionStatus for an incomplete Gemini interaction", async () => {
+    await allowlistChat();
+    mockFetchDispatch({
+      gemini: () =>
+        Promise.resolve(
+          jsonResponse({
+            ...geminiInteractionResponse(GEMINI_FINAL_PAYLOAD),
+            status: "incomplete",
+          }),
+        ),
+    });
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const updateId = 981000066;
+
+    await callWorker(
+      webhookRequest(buildUpdate({ updateId })),
+      testEnv({
+        AI: workersAiAlwaysReturns(workersAiChatCompletionResponse(WORKERS_AI_ESCALATION_PAYLOAD)),
+      }),
+    );
+
+    const lastLine = consoleSpy.mock.calls.at(-1)?.[0] as string;
+    const parsed = JSON.parse(lastLine) as Record<string, unknown>;
+    expect(parsed.service).toBe("gemini");
+    expect(parsed.stage).toBe("interaction-status");
+    expect(parsed.interactionStatus).toBe("incomplete");
+    consoleSpy.mockRestore();
+  });
+
+  it("never logs the raw response body, message text, or API key for any Gemini failure diagnostic", async () => {
+    const identifiableDetail = "synthetic-identifiable-gemini-webhook-diagnostic-leak-2e9a";
+    await allowlistChat();
+    mockFetchDispatch({
+      gemini: () => Promise.resolve(jsonResponse({ error: { message: identifiableDetail } }, 503)),
+    });
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const updateId = 981000067;
+
+    await callWorker(
+      webhookRequest(buildUpdate({ updateId, text: "diagnostic leak canary text" })),
+      testEnv({
+        AI: workersAiAlwaysReturns(workersAiChatCompletionResponse(WORKERS_AI_ESCALATION_PAYLOAD)),
+      }),
+    );
+
+    const loggedLines = consoleSpy.mock.calls.map((call) => call.join(" "));
+    for (const line of loggedLines) {
+      expect(line).not.toContain(identifiableDetail);
+      expect(line).not.toContain("diagnostic leak canary text");
+      expect(line).not.toContain(GEMINI_API_KEY);
+    }
+    consoleSpy.mockRestore();
+  });
+});
+
 describe("POST /telegram/webhook — Workers AI failures never reach Gemini", () => {
   it("a transient Workers AI failure never calls Gemini, and releases the dedupe reservation", async () => {
     await allowlistChat();

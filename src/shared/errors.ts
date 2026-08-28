@@ -19,6 +19,46 @@ export type ErrorCode =
 export type UpstreamService = "telegram" | "openai" | "d1" | "workers-ai" | "gemini";
 
 /**
+ * Phase 9 (pilot incident diagnostics): a fixed, closed set of stages an
+ * upstream provider call can fail at — safe to log, since it names a
+ * point in the call pipeline, never any response content. Not every
+ * provider populates every stage; `"interaction-status"` is Gemini-only
+ * (its Interactions API is the only current caller with a top-level
+ * interaction-completion concept).
+ */
+export type UpstreamDiagnosticStage =
+  | "request"
+  | "http"
+  | "interaction-status"
+  | "response-envelope"
+  | "structured-output"
+  | "logical-validation";
+
+/**
+ * Closed set of Gemini Interactions API top-level `status` values safe to
+ * log, plus two sentinels (`"missing"`, `"unrecognized"`) for a field that
+ * was absent or held something outside the documented set — so a log line
+ * can never carry an arbitrary/unvalidated status string, only one of
+ * these eight fixed values.
+ */
+export type GeminiInteractionStatusForLog =
+  | "completed"
+  | "in_progress"
+  | "requires_action"
+  | "failed"
+  | "cancelled"
+  | "incomplete"
+  | "missing"
+  | "unrecognized";
+
+/** Optional safe diagnostic metadata an upstream call can attach to its own failure — never response content, never a Secret. See docs/security-and-privacy.md, "Log minimization". */
+export interface UpstreamServiceErrorOptions {
+  readonly stage?: UpstreamDiagnosticStage;
+  readonly httpStatus?: number;
+  readonly interactionStatus?: GeminiInteractionStatusForLog;
+}
+
+/**
  * Phase 9.1A: a fixed, closed set of reasons a routine translation
  * provider (Workers AI) may flag a message as needing a stronger model
  * than it can safely handle itself — never free-form model-generated
@@ -83,10 +123,20 @@ export class ConfigurationError extends AppError {
  */
 export abstract class UpstreamServiceError extends AppError {
   readonly service: UpstreamService;
+  readonly stage: UpstreamDiagnosticStage | undefined;
+  readonly httpStatus: number | undefined;
+  readonly interactionStatus: GeminiInteractionStatusForLog | undefined;
 
-  protected constructor(publicMessage: string, service: UpstreamService) {
+  protected constructor(
+    publicMessage: string,
+    service: UpstreamService,
+    options?: UpstreamServiceErrorOptions,
+  ) {
     super(publicMessage);
     this.service = service;
+    this.stage = options?.stage;
+    this.httpStatus = options?.httpStatus;
+    this.interactionStatus = options?.interactionStatus;
   }
 }
 
@@ -95,8 +145,12 @@ export class TransientUpstreamError extends UpstreamServiceError {
   readonly code = "UPSTREAM_TRANSIENT_ERROR" as const;
   readonly retryable = true as const;
 
-  constructor(publicMessage: string, service: UpstreamService) {
-    super(publicMessage, service);
+  constructor(
+    publicMessage: string,
+    service: UpstreamService,
+    options?: UpstreamServiceErrorOptions,
+  ) {
+    super(publicMessage, service, options);
     this.name = "TransientUpstreamError";
   }
 }
@@ -106,8 +160,12 @@ export class PermanentUpstreamError extends UpstreamServiceError {
   readonly code = "UPSTREAM_PERMANENT_ERROR" as const;
   readonly retryable = false as const;
 
-  constructor(publicMessage: string, service: UpstreamService) {
-    super(publicMessage, service);
+  constructor(
+    publicMessage: string,
+    service: UpstreamService,
+    options?: UpstreamServiceErrorOptions,
+  ) {
+    super(publicMessage, service, options);
     this.name = "PermanentUpstreamError";
   }
 }

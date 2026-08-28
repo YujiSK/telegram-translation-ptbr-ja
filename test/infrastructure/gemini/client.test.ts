@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { callGeminiInteraction } from "../../../src/infrastructure/gemini/client";
-import { PermanentUpstreamError, TransientUpstreamError } from "../../../src/shared/errors";
+import {
+  GEMINI_API_VERSION,
+  callGeminiInteraction,
+} from "../../../src/infrastructure/gemini/client";
+import {
+  PermanentUpstreamError,
+  TransientUpstreamError,
+  UpstreamServiceError,
+} from "../../../src/shared/errors";
 
 /**
  * Every test in this file supplies its own `fetchFn`, so
@@ -35,6 +42,21 @@ function fetchMock() {
 const VALID_ENVELOPE = {
   steps: [{ type: "model_output", content: [{ type: "text", text: "{}" }] }],
 };
+
+/** Awaits a rejecting promise and returns its `UpstreamServiceError`, properly narrowed (no unsafe cast) — a plain `.catch()` can't narrow away `callGeminiInteraction`'s `Promise<unknown>` success type. */
+async function captureUpstreamServiceError(
+  promise: Promise<unknown>,
+): Promise<UpstreamServiceError> {
+  try {
+    await promise;
+  } catch (error) {
+    if (error instanceof UpstreamServiceError) {
+      return error;
+    }
+    throw error;
+  }
+  throw new Error("expected the promise to reject with an UpstreamServiceError");
+}
 
 describe("callGeminiInteraction — success and request shape", () => {
   it("returns the parsed JSON body on a 200 response", async () => {
@@ -240,6 +262,105 @@ describe("callGeminiInteraction — documented permanent HTTP statuses", () => {
     await expect(
       callGeminiInteraction({ model: "gemini-3.5-flash-lite" }, { apiKey: API_KEY, fetchFn }),
     ).rejects.toBeInstanceOf(PermanentUpstreamError);
+  });
+});
+
+describe("callGeminiInteraction — diagnostic stage/httpStatus metadata (pilot incident diagnostics)", () => {
+  it("exposes GEMINI_API_VERSION as the fixed literal used in the endpoint URL", () => {
+    expect(GEMINI_API_VERSION).toBe("v1");
+  });
+
+  it("tags a pre-response timeout as stage=request with no httpStatus", async () => {
+    const fetchFn = fetchMock().mockRejectedValue(new DOMException("aborted", "AbortError"));
+
+    const error = await captureUpstreamServiceError(
+      callGeminiInteraction(
+        { model: "gemini-3.5-flash-lite" },
+        { apiKey: API_KEY, fetchFn, timeoutMs: 5 },
+      ),
+    );
+
+    expect(error).toBeInstanceOf(TransientUpstreamError);
+    expect(error.stage).toBe("request");
+    expect(error.httpStatus).toBeUndefined();
+  });
+
+  it("tags a pre-response network failure as stage=request with no httpStatus", async () => {
+    const fetchFn = fetchMock().mockRejectedValue(new TypeError("synthetic network failure"));
+
+    const error = await captureUpstreamServiceError(
+      callGeminiInteraction({ model: "gemini-3.5-flash-lite" }, { apiKey: API_KEY, fetchFn }),
+    );
+
+    expect(error).toBeInstanceOf(TransientUpstreamError);
+    expect(error.stage).toBe("request");
+    expect(error.httpStatus).toBeUndefined();
+  });
+
+  it.each([408, 429, 500, 502, 503, 504])(
+    "tags transient HTTP %s as stage=http with the numeric httpStatus",
+    async (status) => {
+      const fetchFn = fetchMock().mockResolvedValue(
+        jsonResponse({ error: { message: "x" } }, status),
+      );
+
+      const error = await captureUpstreamServiceError(
+        callGeminiInteraction({ model: "gemini-3.5-flash-lite" }, { apiKey: API_KEY, fetchFn }),
+      );
+
+      expect(error).toBeInstanceOf(TransientUpstreamError);
+      expect(error.stage).toBe("http");
+      expect(error.httpStatus).toBe(status);
+    },
+  );
+
+  it.each([400, 401, 403, 404, 422])(
+    "tags permanent HTTP %s as stage=http with the numeric httpStatus",
+    async (status) => {
+      const fetchFn = fetchMock().mockResolvedValue(
+        jsonResponse({ error: { message: "x" } }, status),
+      );
+
+      const error = await captureUpstreamServiceError(
+        callGeminiInteraction({ model: "gemini-3.5-flash-lite" }, { apiKey: API_KEY, fetchFn }),
+      );
+
+      expect(error).toBeInstanceOf(PermanentUpstreamError);
+      expect(error.stage).toBe("http");
+      expect(error.httpStatus).toBe(status);
+    },
+  );
+
+  it("tags a 200 non-JSON body as stage=response-envelope with httpStatus=200", async () => {
+    const fetchFn = fetchMock().mockResolvedValue(
+      new Response("<html>not json</html>", { status: 200 }),
+    );
+
+    const error = await captureUpstreamServiceError(
+      callGeminiInteraction({ model: "gemini-3.5-flash-lite" }, { apiKey: API_KEY, fetchFn }),
+    );
+
+    expect(error).toBeInstanceOf(PermanentUpstreamError);
+    expect(error.stage).toBe("response-envelope");
+    expect(error.httpStatus).toBe(200);
+  });
+
+  it("never leaks the raw response body/error text through the new diagnostic fields", async () => {
+    const identifiableDetail = "synthetic-identifiable-gemini-diagnostic-leak-4b1e";
+    const fetchFn = fetchMock().mockResolvedValue(
+      jsonResponse({ error: { message: identifiableDetail } }, 500),
+    );
+
+    const error = await captureUpstreamServiceError(
+      callGeminiInteraction({ model: "gemini-3.5-flash-lite" }, { apiKey: API_KEY, fetchFn }),
+    );
+
+    const serialized = JSON.stringify({
+      stage: error.stage,
+      httpStatus: error.httpStatus,
+      interactionStatus: error.interactionStatus,
+    });
+    expect(serialized).not.toContain(identifiableDetail);
   });
 });
 

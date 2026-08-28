@@ -1,4 +1,9 @@
-import type { EscalationReason, UpstreamService } from "./errors";
+import type {
+  EscalationReason,
+  GeminiInteractionStatusForLog,
+  UpstreamDiagnosticStage,
+  UpstreamService,
+} from "./errors";
 
 /**
  * Phase 7 structured logging: a strict field allowlist, one JSON line per
@@ -39,6 +44,16 @@ export interface LogFields {
   readonly provider?: LogProvider;
   /** Only ever a fixed enum reason (see EscalationReason) — never the model's own explanation text. */
   readonly escalationReason?: EscalationReason;
+  /** Phase 9 (pilot incident diagnostics): which stage of an upstream call failed — see UpstreamDiagnosticStage. Never response content. */
+  readonly stage?: UpstreamDiagnosticStage;
+  /** A bare HTTP status code — never the response body. */
+  readonly httpStatus?: number;
+  /** Gemini's top-level interaction `status` — always one of the closed set in GeminiInteractionStatusForLog, never an arbitrary/unvalidated string. */
+  readonly interactionStatus?: GeminiInteractionStatusForLog;
+  /** A fixed literal identifying which API version path was called (e.g. "v1") — never a full URL. */
+  readonly endpointVersion?: string;
+  /** The configured, non-secret provider model id (e.g. GEMINI_MODEL's value) — never a model-generated string. */
+  readonly model?: string;
 }
 
 export type LogSink = (line: string) => void;
@@ -70,6 +85,30 @@ function isUpstreamService(value: unknown): value is UpstreamService {
   );
 }
 
+function isUpstreamDiagnosticStage(value: unknown): value is UpstreamDiagnosticStage {
+  return (
+    value === "request" ||
+    value === "http" ||
+    value === "interaction-status" ||
+    value === "response-envelope" ||
+    value === "structured-output" ||
+    value === "logical-validation"
+  );
+}
+
+function isGeminiInteractionStatusForLog(value: unknown): value is GeminiInteractionStatusForLog {
+  return (
+    value === "completed" ||
+    value === "in_progress" ||
+    value === "requires_action" ||
+    value === "failed" ||
+    value === "cancelled" ||
+    value === "incomplete" ||
+    value === "missing" ||
+    value === "unrecognized"
+  );
+}
+
 /**
  * The only sanctioned way to turn a caught `unknown` error into loggable
  * fields — returns a stable class name, never `error.message` or a
@@ -78,12 +117,33 @@ function isUpstreamService(value: unknown): value is UpstreamService {
  * `PermanentUpstreamError`), which is the only error family that carries
  * one.
  */
-export function classifyError(error: unknown): { errorClass: string; service?: UpstreamService } {
+export function classifyError(error: unknown): {
+  errorClass: string;
+  service?: UpstreamService;
+  stage?: UpstreamDiagnosticStage;
+  httpStatus?: number;
+  interactionStatus?: GeminiInteractionStatusForLog;
+} {
   if (!(error instanceof Error)) {
     return { errorClass: "UnknownError" };
   }
   const service = "service" in error ? error.service : undefined;
-  return isUpstreamService(service)
-    ? { errorClass: error.name, service }
-    : { errorClass: error.name };
+  if (!isUpstreamService(service)) {
+    return { errorClass: error.name };
+  }
+  const stage =
+    "stage" in error && isUpstreamDiagnosticStage(error.stage) ? error.stage : undefined;
+  const httpStatus =
+    "httpStatus" in error && typeof error.httpStatus === "number" ? error.httpStatus : undefined;
+  const interactionStatus =
+    "interactionStatus" in error && isGeminiInteractionStatusForLog(error.interactionStatus)
+      ? error.interactionStatus
+      : undefined;
+  return {
+    errorClass: error.name,
+    service,
+    ...(stage !== undefined ? { stage } : {}),
+    ...(httpStatus !== undefined ? { httpStatus } : {}),
+    ...(interactionStatus !== undefined ? { interactionStatus } : {}),
+  };
 }

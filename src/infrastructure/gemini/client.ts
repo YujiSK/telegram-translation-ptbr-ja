@@ -30,7 +30,9 @@ import { PermanentUpstreamError, TransientUpstreamError } from "../../shared/err
  * below.
  */
 
-const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1";
+/** Safe to log (a fixed literal, never derived from a response) — see docs/security-and-privacy.md, "Log minimization". */
+export const GEMINI_API_VERSION = "v1";
+const GEMINI_API_BASE = `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}`;
 export const DEFAULT_GEMINI_TIMEOUT_MS = 15_000;
 
 export interface GeminiApiCallOptions {
@@ -77,7 +79,9 @@ export async function callGeminiInteraction(
     });
   } catch (error) {
     if (isAbortLikeError(error)) {
-      throw new TransientUpstreamError("Gemini Interactions API request timed out", "gemini");
+      throw new TransientUpstreamError("Gemini Interactions API request timed out", "gemini", {
+        stage: "request",
+      });
     }
     // Phase 9.1A review-hardening reliability principle, applied here
     // from the start rather than retrofitted: an ambiguous network/
@@ -87,6 +91,7 @@ export async function callGeminiInteraction(
     throw new TransientUpstreamError(
       "Gemini Interactions API request failed before a response was received",
       "gemini",
+      { stage: "request" },
     );
   }
 
@@ -94,6 +99,7 @@ export async function callGeminiInteraction(
     throw new TransientUpstreamError(
       `Gemini Interactions API responded with HTTP ${response.status}`,
       "gemini",
+      { stage: "http", httpStatus: response.status },
     );
   }
 
@@ -105,6 +111,7 @@ export async function callGeminiInteraction(
     throw new PermanentUpstreamError(
       `Gemini Interactions API rejected the request with HTTP ${response.status}`,
       "gemini",
+      { stage: "http", httpStatus: response.status },
     );
   }
 
@@ -115,6 +122,7 @@ export async function callGeminiInteraction(
     throw new PermanentUpstreamError(
       "Gemini Interactions API returned a non-JSON response",
       "gemini",
+      { stage: "response-envelope", httpStatus: response.status },
     );
   }
 

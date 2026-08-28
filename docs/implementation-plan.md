@@ -768,6 +768,36 @@ for re-verification before any live call.
   not proceed to any external setup (Secret registration, remote
   migration, deploy), DeepL, or a new phase as part of this task.
 
+**Pilot incident diagnostics (post-completion, Phase 9 pilot):** with
+Gemini escalation enabled for the pilot and a report of pilot messages
+that trigger escalation getting no Telegram reply, a narrow diagnostics-
+only pass added safe failure-stage metadata to every Gemini upstream
+error, so a future incident can identify which call stage failed
+(`"request"`, `"http"`, `"interaction-status"`, `"response-envelope"`,
+`"structured-output"`, `"logical-validation"`) without ever logging
+message text, translated text, a raw response body, an interaction ID,
+or a Secret — see `docs/security-and-privacy.md`, "Log minimization"
+(the "Pilot incident diagnostics" bullet), for the full field list.
+`UpstreamServiceErrorOptions` (`src/shared/errors.ts`) lets
+`src/infrastructure/gemini/{client,translate}.ts` attach this metadata
+at each throw site; `classifyError()`
+(`src/shared/structured-log.ts`) extracts it through the same
+type-guard discipline as `service`; `src/handlers/telegram-webhook.ts`'s
+existing catch-all surfaces it, plus the fixed `endpointVersion` literal
+and the configured (non-secret) `GEMINI_MODEL` value, only for a
+`service: "gemini"` error — no new log line, no change to routing,
+quota, the Gemini request shape, `store: false`, D1 schema, or the
+OpenAI/Workers AI paths. `npm run check` green (40 test files, 870
+tests, up from 826 at the end of Phase 9.1B). Separately, a check
+against current official Google documentation (see the corresponding
+task's own report) raised doubt about whether `/v1/interactions` is
+still the correct endpoint path (`/v1beta/interactions` appeared more
+consistently in available sources) and whether `response_format` should
+be an array rather than a single object — this diagnostics pass
+intentionally made no code change for either, since resolving them
+requires a live-verified endpoint/parser change, a separate,
+separately-approved action.
+
 ---
 
 ## Phase 9 — Pilot

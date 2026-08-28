@@ -36,6 +36,7 @@ import {
   upsertTranslationCorrection,
 } from "../infrastructure/d1/translation-corrections";
 import { sendMessage } from "../infrastructure/telegram/send-message";
+import { GEMINI_API_VERSION } from "../infrastructure/gemini/client";
 import { createGeminiTranslationBoundary } from "../infrastructure/gemini/translate";
 import { translateMessage } from "../infrastructure/openai/translate";
 import { createTranslationRouter } from "../infrastructure/translation/router";
@@ -757,13 +758,28 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     // Permanent failures leave the dedupe row in place on purpose: a
     // Telegram redelivery will then be classified as ignored:duplicate
     // instead of repeating the same doomed provider/Telegram call forever.
+    const classified = classifyError(error);
+    // Phase 9 (pilot incident diagnostics): a Gemini escalation failure
+    // additionally logs which call stage it failed at (see
+    // classifyError's stage/httpStatus/interactionStatus above), the
+    // fixed API version literal, and the configured (non-secret) model
+    // id — never response content, never a Secret. Only reachable when
+    // config.geminiEscalationEnabled is true, since that is the only way
+    // a "gemini" service error can occur.
+    const geminiDiagnostics =
+      classified.service === "gemini" &&
+      config.translationProvider === "workers-ai" &&
+      config.geminiEscalationEnabled
+        ? { endpointVersion: GEMINI_API_VERSION, model: config.geminiModel }
+        : {};
     return finish(internalError(), startedAt, {
       event: "telegram_webhook",
       outcome: "internal_error",
       updateId: update.updateId,
       chatId: update.chatId,
       provider: config.translationProvider,
-      ...classifyError(error),
+      ...classified,
+      ...geminiDiagnostics,
     });
   }
 }

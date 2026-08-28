@@ -8,7 +8,12 @@ import type {
   TranslationOutcome,
   TranslationRequest,
 } from "../../domain/translation";
-import { PermanentUpstreamError, TransientUpstreamError } from "../../shared/errors";
+import {
+  PermanentUpstreamError,
+  TransientUpstreamError,
+  type GeminiInteractionStatusForLog,
+  type UpstreamDiagnosticStage,
+} from "../../shared/errors";
 import {
   TRANSLATION_JSON_SCHEMA,
   buildTranslationInputGemini,
@@ -53,10 +58,19 @@ function isUnknownArray(value: unknown): value is unknown[] {
   return Array.isArray(value);
 }
 
-function malformed(reason: string): never {
+/**
+ * `stage` defaults to `"response-envelope"` since most call sites here
+ * check the response's structural shape before any JSON-content parsing;
+ * `parseStructuredOutput` and `validateLogicalConsistency` pass their own
+ * stage explicitly. See docs/security-and-privacy.md, "Log minimization"
+ * — `reason` only ever reaches `publicMessage`, which this codebase never
+ * logs (see `classifyError` in `src/shared/structured-log.ts`).
+ */
+function malformed(reason: string, stage: UpstreamDiagnosticStage = "response-envelope"): never {
   throw new PermanentUpstreamError(
     `Gemini returned a malformed translation result: ${reason}`,
     "gemini",
+    { stage },
   );
 }
 
@@ -78,15 +92,25 @@ function validateInteractionStatus(envelope: Record<string, unknown>): void {
     return;
   }
   if (status === "in_progress" || status === "failed" || status === "cancelled") {
-    throw new TransientUpstreamError("Gemini interaction did not complete successfully", "gemini");
+    throw new TransientUpstreamError("Gemini interaction did not complete successfully", "gemini", {
+      stage: "interaction-status",
+      interactionStatus: status,
+    });
   }
   if (status === "incomplete" || status === "requires_action") {
     throw new PermanentUpstreamError(
       "Gemini interaction did not produce a final translation",
       "gemini",
+      { stage: "interaction-status", interactionStatus: status },
     );
   }
-  malformed("missing or unknown interaction status");
+  const interactionStatus: GeminiInteractionStatusForLog =
+    status === undefined ? "missing" : "unrecognized";
+  throw new PermanentUpstreamError(
+    "Gemini returned a malformed translation result: missing or unknown interaction status",
+    "gemini",
+    { stage: "interaction-status", interactionStatus },
+  );
 }
 
 /**
@@ -166,29 +190,29 @@ function parseStructuredOutput(rawText: string): StructuredOutputPayload {
   try {
     parsed = JSON.parse(rawText);
   } catch {
-    malformed("model output text was not valid JSON");
+    malformed("model output text was not valid JSON", "structured-output");
   }
 
   if (!isRecord(parsed)) {
-    malformed("structured output was not a JSON object");
+    malformed("structured output was not a JSON object", "structured-output");
   }
 
   const { detectedLanguage, action, targetLanguage, translatedText, styleSignals } = parsed;
 
   if (!isLanguage(detectedLanguage)) {
-    malformed("invalid detectedLanguage");
+    malformed("invalid detectedLanguage", "structured-output");
   }
   if (!isTranslateAction(action)) {
-    malformed("invalid action");
+    malformed("invalid action", "structured-output");
   }
   if (!isNullableTargetLanguage(targetLanguage)) {
-    malformed("invalid targetLanguage");
+    malformed("invalid targetLanguage", "structured-output");
   }
   if (!isNullableString(translatedText)) {
-    malformed("invalid translatedText");
+    malformed("invalid translatedText", "structured-output");
   }
   if (!isNullableStyleSignals(styleSignals)) {
-    malformed("invalid styleSignals");
+    malformed("invalid styleSignals", "structured-output");
   }
 
   return { detectedLanguage, action, targetLanguage, translatedText, styleSignals };
@@ -205,6 +229,7 @@ function validateLogicalConsistency(payload: StructuredOutputPayload): void {
     ) {
       malformed(
         "detectedLanguage=other must have action=skip with null target/translation/styleSignals",
+        "logical-validation",
       );
     }
     return;
@@ -221,6 +246,7 @@ function validateLogicalConsistency(payload: StructuredOutputPayload): void {
   ) {
     malformed(
       "detectedLanguage=ja|pt-br must have a matching translate action, non-empty text, and non-null styleSignals",
+      "logical-validation",
     );
   }
 }
