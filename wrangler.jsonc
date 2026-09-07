@@ -18,25 +18,15 @@
   // docs/security-and-privacy.md. Secrets never go here.
   "vars": {
     "ENVIRONMENT": "development",
-    // Phase 9.1A: which translation provider the router uses for the
-    // ordinary-text translation path — see
-    // docs/decisions/0002-multi-provider-translation-routing.md and
-    // src/infrastructure/translation/router.ts. "workers-ai" is the
-    // routine (no-OpenAI-spend) path; "openai" is the retained,
-    // disabled-by-default-in-intent legacy/compatibility path.
-    "TRANSLATION_PROVIDER": "workers-ai",
-    // Non-secret model identifier for the Workers AI routine provider.
-    // An operational choice, not a domain constant — see
-    // docs/phase9-provider-plan.md and docs/architecture.md.
+    // DeepL-first: deterministic preflight chooses DeepL OR Gemini.
+    // workers-ai is the rollback mode; openai retains the legacy path.
+    "TRANSLATION_PROVIDER": "deepl",
+    // Keep this model and the AI binding for Workers AI rollback.
     "WORKERS_AI_MODEL": "@cf/meta/llama-3.1-8b-instruct-fast",
     // Retained only for TRANSLATION_PROVIDER=openai (legacy/compat path).
     "OPENAI_MODEL": "gpt-4o-mini",
-    // Phase 9.1B: strict "true"/"false" flag — whether the workers-ai
-    // routine path escalates a needsEscalation candidate to Gemini.
-    // "false" here means the code path exists in source but is not
-    // live — see docs/phase9-provider-plan.md, "Gemini Free Tier
-    // privacy boundary". Only read/required when TRANSLATION_PROVIDER
-    // is "workers-ai" — see src/config/app-config.ts.
+    // Shared Gemini availability switch for deepl and workers-ai modes.
+    // Disabled Gemini makes sensitive DeepL-mode input fail closed.
     "GEMINI_ESCALATION_ENABLED": "true",
     // Non-secret model identifier for the Gemini semantic-escalation
     // provider. Only required when GEMINI_ESCALATION_ENABLED is "true".

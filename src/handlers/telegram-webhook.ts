@@ -1,3 +1,4 @@
+import { createDeepLTranslationProvider } from "../infrastructure/deepl/translate";
 import { validateAppConfig } from "../config/app-config";
 import { validateReliabilityConfig } from "../config/reliability-config";
 import { parseCommandMessage } from "../commands/parse-command";
@@ -499,7 +500,7 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
   // src/infrastructure/translation/router.ts, "Provider metadata".
   let translateBoundary: TranslateBoundary;
   let finalProvider: LogProvider = config.translationProvider;
-  if (config.translationProvider === "workers-ai") {
+  if (config.translationProvider !== "openai") {
     // Phase 9.1B: Gemini escalation wiring. "Is a gemini boundary
     // actually supplied to the router" is the sole signal the router
     // uses to decide escalation availability — see
@@ -568,11 +569,15 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     }
 
     translateBoundary = createTranslationRouter({
-      mode: "workers-ai",
-      workersAi: createWorkersAiTranslationProvider({
-        binding: env.AI,
-        model: config.workersAiModel,
-      }),
+      mode: config.translationProvider,
+      ...(config.translationProvider === "deepl"
+        ? { deepl: createDeepLTranslationProvider({ apiKey: env.DEEPL_API_KEY }) }
+        : {
+            workersAi: createWorkersAiTranslationProvider({
+              binding: env.AI,
+              model: config.workersAiModel,
+            }),
+          }),
       ...(geminiBoundary !== undefined ? { gemini: geminiBoundary } : {}),
       ...(reserveGeminiAttempt !== undefined ? { beforeGeminiAttempt: reserveGeminiAttempt } : {}),
       onFinalProviderSelected: (provider) => {
@@ -707,7 +712,7 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
       // minute check can throw this — the OpenAI reservation closure is
       // never constructed in this mode (see "Phase 9.1B: Gemini
       // escalation wiring" above), so this branch is unambiguous.
-      if (config.translationProvider === "workers-ai") {
+      if (config.translationProvider !== "openai") {
         // Dedupe reservation KEPT — a redelivery would just re-derive
         // the same escalation-required decision; Gemini was never
         // called, matching the "escalation unavailable" outcome family.
@@ -732,7 +737,7 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     }
     if (error instanceof UsageLimitExceededError) {
       // Phase 9.1B: same provider-branch disambiguation as RateLimitExceededError above.
-      if (config.translationProvider === "workers-ai") {
+      if (config.translationProvider !== "openai") {
         return finish(accepted("ignored:escalation-unavailable"), startedAt, {
           event: "telegram_webhook",
           outcome: "ignored:escalation-unavailable",
@@ -768,7 +773,7 @@ export async function handleTelegramWebhook(request: Request, env: Env): Promise
     // a "gemini" service error can occur.
     const geminiDiagnostics =
       classified.service === "gemini" &&
-      config.translationProvider === "workers-ai" &&
+      config.translationProvider !== "openai" &&
       config.geminiEscalationEnabled
         ? { endpointVersion: GEMINI_API_VERSION, model: config.geminiModel }
         : {};

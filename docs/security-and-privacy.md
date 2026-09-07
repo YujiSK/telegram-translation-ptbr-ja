@@ -28,6 +28,7 @@ TELEGRAM_BOT_TOKEN
 TELEGRAM_WEBHOOK_SECRET
 SETUP_ADMIN_SECRET
 GEMINI_API_KEY
+DEEPL_API_KEY
 ```
 
 **Phase 9.1B note on `GEMINI_API_KEY`:** implemented in source (read
@@ -215,7 +216,7 @@ a future call site could accidentally widen.
   `durationMs`, `updateId`, `chatId`, `errorClass`, `service`,
   `limitType` (now including `"gemini-minute"`/`"gemini-daily"`, Phase
   9.1B), `attempt`, `retryCount`, and — **Phase 9.1A/9.1B** — `provider`
-  (fixed enum `"workers-ai"` | `"openai"` | `"gemini"` — reflects the
+  (fixed enum `"workers-ai"` | `"openai"` | `"gemini"` | `"deepl"` — reflects the
   actual final provider that produced the outcome, e.g. `"gemini"` on a
   successful semantic escalation, not just the configured router mode)
   and `escalationReason` (fixed 6-value enum, e.g. `"ambiguous-context"`;
@@ -547,3 +548,17 @@ the full per-threat breakdown.
 | Gemini `store: false` regression              | Force-set unconditionally in `src/infrastructure/gemini/client.ts`, after the caller's body is spread — no caller can omit or override it (Phase 9.1B)  | `test/infrastructure/gemini/client.test.ts` and `telegram-webhook-gemini.test.ts` (asserts `store: false` even against a caller-supplied `store: true`, and on every real webhook-triggered call) |
 | Gemini API key / interaction-ID leak          | `x-goog-api-key` header only, never a query parameter or logged field; interaction IDs never persisted/logged/reused (Phase 9.1B)                       | `client.test.ts` ("no Secret or raw error body leakage"), `telegram-webhook-gemini.test.ts` ("Gemini security/privacy invariants")                                                                |
 | Unauthorized/premature live Gemini escalation | `GEMINI_ESCALATION_ENABLED=false` by default; `GEMINI_API_KEY` unregistered; live enablement requires a separate privacy decision + deploy (Phase 9.1B) | `app-config.test.ts` (strict boolean parsing, conditional requirement); `telegram-webhook-gemini.test.ts` ("escalation disabled" / "Secret is missing")                                           |
+
+## DeepL-first privacy boundary
+
+DEEPL_API_KEY is an optional Secret binding, required only for translation in
+`deepl` mode. No key is added to configuration or registered by this change.
+DeepL receives only the current source text and language direction, never
+speaker identifiers, preferences, corrections or reply context. Inputs needing
+those semantic signals go directly to Gemini under its existing privacy and
+budget policy. The two providers are mutually exclusive per message.
+
+DeepL response bodies, source/translated text and authentication headers are
+never logged or persisted. `deepl` is a fixed safe provider/service log enum.
+The client discards upstream error bodies and sanitizes thrown errors. DeepL
+supplies no observed style, so it does not create inferred speaker memory.

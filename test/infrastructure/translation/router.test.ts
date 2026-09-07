@@ -530,3 +530,112 @@ describe("createTranslationRouter — openai mode", () => {
     await expect(router.translate(REQUEST)).rejects.toBeInstanceOf(ConfigurationError);
   });
 });
+
+describe("DeepL-first exclusive routing", () => {
+  const clearRequest = { ...REQUEST, sourceText: "明日の午後は家族と一緒に公園へ遊びに行きます。" };
+  const ambiguousRequest = { ...REQUEST, sourceText: "\u3046\u3093" };
+  function setup() {
+    const deepl = fakeWorkersAiProvider({
+      outcome: TRANSLATED_OUTCOME,
+      needsEscalation: false,
+      escalationReason: "none",
+    });
+    const gemini = fakeOpenAiBoundary(TRANSLATED_OUTCOME);
+    const workersAi = fakeWorkersAiProvider({
+      outcome: TRANSLATED_OUTCOME,
+      needsEscalation: false,
+      escalationReason: "none",
+    });
+    const openai = fakeOpenAiBoundary(TRANSLATED_OUTCOME);
+    const budget = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    const selected = vi.fn();
+    const options = {
+      mode: "deepl" as const,
+      deepl: deepl.provider,
+      gemini: gemini.boundary,
+      workersAi: workersAi.provider,
+      openai: openai.boundary,
+      beforeGeminiAttempt: budget,
+      onFinalProviderSelected: selected,
+    };
+    return { deepl, gemini, workersAi, openai, budget, selected, options };
+  }
+  it("calls only DeepL for clear text", async () => {
+    const s = setup();
+    await createTranslationRouter(s.options).translate(clearRequest);
+    expect(s.deepl.translate).toHaveBeenCalledExactlyOnceWith(clearRequest);
+    expect(s.gemini.translate).not.toHaveBeenCalled();
+    expect(s.budget).not.toHaveBeenCalled();
+    expect(s.workersAi.translate).not.toHaveBeenCalled();
+    expect(s.openai.translate).not.toHaveBeenCalled();
+    expect(s.selected).toHaveBeenCalledWith("deepl");
+  });
+  it("calls Gemini directly with original context after reserving budget", async () => {
+    const s = setup();
+    s.budget.mockImplementation(() => {
+      expect(s.gemini.translate).not.toHaveBeenCalled();
+      return Promise.resolve();
+    });
+    await createTranslationRouter(s.options).translate(ambiguousRequest);
+    expect(s.gemini.translate).toHaveBeenCalledExactlyOnceWith(ambiguousRequest);
+    expect(s.budget).toHaveBeenCalledTimes(1);
+    expect(s.deepl.translate).not.toHaveBeenCalled();
+    expect(s.workersAi.translate).not.toHaveBeenCalled();
+    expect(s.openai.translate).not.toHaveBeenCalled();
+    expect(s.selected).toHaveBeenCalledWith("gemini");
+  });
+  it.each([
+    new TransientUpstreamError("safe", "deepl"),
+    new PermanentUpstreamError("safe", "deepl"),
+  ])("never falls back after DeepL failure", async (error) => {
+    const s = setup();
+    s.deepl.translate.mockRejectedValue(error);
+    await expect(createTranslationRouter(s.options).translate(clearRequest)).rejects.toBe(error);
+    expect(s.gemini.translate).not.toHaveBeenCalled();
+    expect(s.openai.translate).not.toHaveBeenCalled();
+  });
+  it("never escalates a DeepL candidate after an attempt", async () => {
+    const s = setup();
+    s.deepl.translate.mockResolvedValue({
+      outcome: TRANSLATED_OUTCOME,
+      needsEscalation: true,
+      escalationReason: "low-confidence",
+    });
+    await expect(createTranslationRouter(s.options).translate(clearRequest)).rejects.toBeInstanceOf(
+      EscalationRequiredError,
+    );
+    expect(s.gemini.translate).not.toHaveBeenCalled();
+  });
+  it("does not call DeepL when Gemini is disabled", async () => {
+    const s = setup();
+    await expect(
+      createTranslationRouter({ mode: "deepl", deepl: s.deepl.provider }).translate(
+        ambiguousRequest,
+      ),
+    ).rejects.toBeInstanceOf(EscalationRequiredError);
+    expect(s.deepl.translate).not.toHaveBeenCalled();
+  });
+  it("makes no provider call when the Gemini budget rejects", async () => {
+    const s = setup();
+    s.budget.mockRejectedValue(new RateLimitExceededError("safe"));
+    await expect(
+      createTranslationRouter(s.options).translate(ambiguousRequest),
+    ).rejects.toBeInstanceOf(RateLimitExceededError);
+    expect(s.gemini.translate).not.toHaveBeenCalled();
+    expect(s.deepl.translate).not.toHaveBeenCalled();
+  });
+  it("does not fall back after Gemini fails", async () => {
+    const s = setup();
+    s.gemini.translate.mockRejectedValue(new TransientUpstreamError("safe", "gemini"));
+    await expect(
+      createTranslationRouter(s.options).translate(ambiguousRequest),
+    ).rejects.toBeInstanceOf(TransientUpstreamError);
+    expect(s.deepl.translate).not.toHaveBeenCalled();
+    expect(s.openai.translate).not.toHaveBeenCalled();
+  });
+  it("requires the DeepL adapter only on the routine route", async () => {
+    await expect(
+      createTranslationRouter({ mode: "deepl" }).translate(clearRequest),
+    ).rejects.toBeInstanceOf(ConfigurationError);
+  });
+});

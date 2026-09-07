@@ -2,8 +2,8 @@ import type { TranslationOutcome, TranslationRequest } from "../../domain/transl
 import type { EscalationReason } from "../../shared/errors";
 
 /**
- * Phase 9.1A: the shape every translation provider adapter (Workers AI
- * today; Gemini/DeepL in later phases) returns internally. This is
+ * The shape translation provider adapters (Workers AI and DeepL)
+ * return internally. Gemini remains a final TranslateBoundary. This is
  * deliberately infrastructure-only — `needsEscalation`/`escalationReason`
  * never appear on the domain `TranslationOutcome` (src/domain/translation.ts)
  * or cross into `application/`, per docs/decisions/0002-multi-provider-translation-routing.md,

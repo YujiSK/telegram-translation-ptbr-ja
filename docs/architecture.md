@@ -1,5 +1,9 @@
 # Architecture
 
+Current provider update: see "DeepL-first routing" below. DeepL is the local
+configuration default; Workers AI remains available for rollback. Older phase
+status paragraphs below describe the historical implementation slices.
+
 Status: **Foundation, domain, D1 repository layer, the Telegram webhook
 boundary, OpenAI translation, speaker memory, the command surface,
 reliability/security hardening, Phase 8A deployment-preparation tooling,
@@ -959,3 +963,41 @@ Voice transcription, image OCR, sticker translation, video, full
 conversation history, RAG/vector search, a web admin UI, multi-tenant SaaS
 support. See the project brief and implementation plan for the full
 out-of-scope list.
+
+## DeepL-first routing
+
+`TRANSLATION_PROVIDER=deepl` uses `infrastructure/deepl/gate.ts` before any
+translation HTTP call. Clear Japanese requires kana, only Japanese letters,
+more than 12 letters/digits, and no reply context. It goes to DeepL PT-BR with
+source JA. Latin-only letters (including accented Latin; punctuation, numbers
+and emoji permitted) go to DeepL JA without source_lang. Only detected source
+PT is accepted; all other detected sources produce a skipped outcome.
+
+Mixed Japanese/Latin, applicable corrections and explicit tone/emoji preferences
+select existing Gemini directly. Short Japanese and all Japanese replies also
+select Gemini. Other ambiguous input is conservatively sent to Gemini. This is
+an intentional heuristic, not a promise to detect all semantic ambiguity.
+
+`DeepLTranslationProvider` implements `TranslationProvider`; its output has no
+invented style signals. Existing memory reads stay before translation, and DeepL
+success does not overwrite observed speaker style. Domain and application types
+remain vendor agnostic. Only source text and direction are sent to DeepL.
+
+The client uses fixed `/v2/translate` hosts (`api-free.deepl.com` for keys ending
+`:fx`, `api.deepl.com` otherwise), `DeepL-Auth-Key` header authentication, no
+redirects, a five-second abort signal and no retries. HTTP 408/429/5xx and network
+failures are transient. Other HTTP errors (including quota 456), malformed JSON,
+invalid translation fields/counts, oversized output and inconsistent JA source
+are permanent. Errors contain only fixed messages and safe status/stage fields.
+
+The router calls at most one external translation provider: DeepL OR Gemini.
+Failure, malformed output or a non-PT detection never triggers a second call.
+Gemini uses its existing original-request prompt, switch and minute/day budgets;
+missing keys/budgets fail before its HTTP attempt. Disabled Gemini yields the
+existing escalation-unavailable outcome. DEEPL_API_KEY is required only on the
+DeepL-mode translation path. Commands remain independent of provider config.
+Workers AI retains its two-provider semantic escalation path for rollback;
+OpenAI retains its isolated legacy path and attempt counters.
+
+API contract reference: [DeepL translate API](https://developers.deepl.com/api-reference/translate/request-translation).
+All automated provider traffic is mocked; this change performs no live call.

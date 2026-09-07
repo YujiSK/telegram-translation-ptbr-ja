@@ -13,6 +13,7 @@
  * a value.
  */
 interface Env {
+  DEEPL_API_KEY?: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
   TELEGRAM_BOT_TOKEN?: string;
   OPENAI_API_KEY?: string;

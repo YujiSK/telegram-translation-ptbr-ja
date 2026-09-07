@@ -1,55 +1,26 @@
 import { ConfigurationError, type Result } from "../shared/errors";
 
 /**
- * Non-secret configuration only. Secrets (OPENAI_API_KEY,
- * TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, SETUP_ADMIN_SECRET) must
- * never be read through this module — see docs/security-and-privacy.md
- * and docs/project-rules.md rule 10.
- *
- * Phase 9.1A: `AppConfig` is a discriminated union on `translationProvider`
- * rather than one shape that always requires `OPENAI_MODEL`. The command
- * path never calls `validateAppConfig` at all (see
- * src/handlers/telegram-webhook.ts and docs/architecture.md, "A command
- * message never invokes an AI provider") — this module only needs to
- * distinguish the two *translation-path* provider modes:
- * `TRANSLATION_PROVIDER=workers-ai` requires `WORKERS_AI_MODEL` and never
- * requires `OPENAI_MODEL`; `TRANSLATION_PROVIDER=openai` (the retained
- * legacy/compatibility path) requires `OPENAI_MODEL` and never requires
- * `WORKERS_AI_MODEL`. `MAX_TRANSLATABLE_MESSAGE_LENGTH` is required in
- * both modes, since the length check runs before either provider is
- * called.
- *
- * This module is a pure validator: it takes a plain string-keyed record
- * (the shape both `process.env`-like sources and a Worker's non-secret
- * `env` vars share) and returns a validated AppConfig or a
- * ConfigurationError.
- *
- * Phase 9.1B: the `workers-ai` variant additionally carries Gemini
- * semantic-escalation config, itself a nested discriminated union on
- * `geminiEscalationEnabled` — disabled requires nothing else Gemini-
- * related (no `GEMINI_MODEL`, no budget config, no `GEMINI_API_KEY`);
- * enabled requires `GEMINI_MODEL` plus both attempt-budget ceilings. This
- * mirrors the `WORKERS_AI_MODEL`/`OPENAI_MODEL` conditional-requirement
- * pattern above and keeps the command path (which never calls this
- * function at all — see src/handlers/telegram-webhook.ts) untouched by
- * any of it. `GEMINI_API_KEY` is a Secret and is deliberately never read
- * here — see "Secret handling" in docs/security-and-privacy.md; it is
- * read directly from `env` in the webhook's runtime wiring, only when
- * `geminiEscalationEnabled` is `true`.
+ * Pure non-secret validation. DeepL needs no model ID; Workers AI rollback
+ * and OpenAI legacy require only their own model. DeepL and Workers AI share
+ * the optional Gemini switch, model and minute/day budgets. Disabled Gemini
+ * requires no model or budgets and sensitive input then fails closed.
+ * Secrets are checked directly in webhook wiring, never in this validator.
+ * Commands bypass translation configuration entirely.
  */
 
 export type AppConfigInput = Readonly<Record<string, string | undefined>>;
 
 export type AppEnvironment = "development" | "test" | "production";
 
-export type TranslationProviderId = "workers-ai" | "openai";
+export type TranslationProviderId = "workers-ai" | "openai" | "deepl";
 
 interface BaseAppConfig {
   readonly environment: AppEnvironment;
   readonly maxTranslatableMessageLength: number;
 }
 
-/** Phase 9.1B: Gemini semantic-escalation config, nested inside the `workers-ai` AppConfig variant only — see the module doc comment. */
+/** Gemini availability and budgets shared by DeepL-first and Workers AI modes. */
 export type GeminiEscalationConfig =
   | { readonly geminiEscalationEnabled: false }
   | {
@@ -60,6 +31,7 @@ export type GeminiEscalationConfig =
     };
 
 export type AppConfig =
+  | (BaseAppConfig & { readonly translationProvider: "deepl" } & GeminiEscalationConfig)
   | (BaseAppConfig & {
       readonly translationProvider: "workers-ai";
       readonly workersAiModel: string;
@@ -67,7 +39,7 @@ export type AppConfig =
   | (BaseAppConfig & { readonly translationProvider: "openai"; readonly openaiModel: string });
 
 const APP_ENVIRONMENTS: readonly AppEnvironment[] = ["development", "test", "production"];
-const TRANSLATION_PROVIDERS: readonly TranslationProviderId[] = ["workers-ai", "openai"];
+const TRANSLATION_PROVIDERS: readonly TranslationProviderId[] = ["workers-ai", "openai", "deepl"];
 
 function isAppEnvironment(value: string): value is AppEnvironment {
   return (APP_ENVIRONMENTS as readonly string[]).includes(value);
@@ -143,8 +115,11 @@ export function validateAppConfig(input: AppConfigInput): Result<AppConfig, Conf
     return fail("MAX_TRANSLATABLE_MESSAGE_LENGTH", "must be a positive integer");
   }
 
-  if (providerRaw === "workers-ai") {
-    const workersAiModel = readModelId(input, "WORKERS_AI_MODEL");
+  if (providerRaw === "workers-ai" || providerRaw === "deepl") {
+    const workersAiModel =
+      providerRaw === "workers-ai"
+        ? readModelId(input, "WORKERS_AI_MODEL")
+        : { ok: true as const, value: "" };
     if (!workersAiModel.ok) {
       return workersAiModel;
     }
@@ -163,8 +138,9 @@ export function validateAppConfig(input: AppConfigInput): Result<AppConfig, Conf
         ok: true,
         value: {
           environment: environmentRaw,
-          translationProvider: "workers-ai",
-          workersAiModel: workersAiModel.value,
+          ...(providerRaw === "workers-ai"
+            ? { translationProvider: "workers-ai" as const, workersAiModel: workersAiModel.value }
+            : { translationProvider: "deepl" as const }),
           maxTranslatableMessageLength,
           geminiEscalationEnabled: false,
         },
@@ -196,8 +172,9 @@ export function validateAppConfig(input: AppConfigInput): Result<AppConfig, Conf
       ok: true,
       value: {
         environment: environmentRaw,
-        translationProvider: "workers-ai",
-        workersAiModel: workersAiModel.value,
+        ...(providerRaw === "workers-ai"
+          ? { translationProvider: "workers-ai" as const, workersAiModel: workersAiModel.value }
+          : { translationProvider: "deepl" as const }),
         maxTranslatableMessageLength,
         geminiEscalationEnabled: true,
         geminiModel: geminiModel.value,

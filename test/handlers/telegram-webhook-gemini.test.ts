@@ -73,6 +73,7 @@ function testEnv(overrides: TestEnvOverrides = {}): Env {
   const { AI: fakeAi, ...rest } = overrides;
   return {
     ...env,
+    TRANSLATION_PROVIDER: "workers-ai",
     TELEGRAM_WEBHOOK_SECRET: WEBHOOK_SECRET,
     TELEGRAM_BOT_TOKEN,
     GEMINI_ESCALATION_ENABLED: "true",

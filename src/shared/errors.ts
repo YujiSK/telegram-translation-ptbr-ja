@@ -16,7 +16,7 @@ export type ErrorCode =
   | "USAGE_LIMIT_EXCEEDED"
   | "ESCALATION_REQUIRED";
 
-export type UpstreamService = "telegram" | "openai" | "d1" | "workers-ai" | "gemini";
+export type UpstreamService = "telegram" | "openai" | "d1" | "workers-ai" | "gemini" | "deepl";
 
 /**
  * Phase 9 (pilot incident diagnostics): a fixed, closed set of stages an

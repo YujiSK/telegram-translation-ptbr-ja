@@ -27,7 +27,7 @@ export type LogLimitType =
   "chat-updates" | "chat-openai" | "openai-daily" | "gemini-minute" | "gemini-daily";
 
 /** Phase 9.1A/9.1B: which translation provider actually produced (or was selected for) this request's final outcome — a fixed enum, never a model ID or wire-format detail. For a Gemini-escalated translation this is "gemini", not "workers-ai" — see src/infrastructure/translation/router.ts's onFinalProviderSelected. */
-export type LogProvider = "workers-ai" | "openai" | "gemini";
+export type LogProvider = "workers-ai" | "openai" | "gemini" | "deepl";
 
 export interface LogFields {
   readonly event: string;
@@ -81,7 +81,8 @@ function isUpstreamService(value: unknown): value is UpstreamService {
     value === "openai" ||
     value === "d1" ||
     value === "workers-ai" ||
-    value === "gemini"
+    value === "gemini" ||
+    value === "deepl"
   );
 }
 

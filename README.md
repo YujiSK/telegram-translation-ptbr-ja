@@ -258,3 +258,17 @@ The translation pilot is paused until Phase 9.1 replaces/generalizes the OpenAI-
 ## Git workflow
 
 This repository currently develops directly on `main`. Before code changes, follow [`docs/project-rules.md`](docs/project-rules.md): start clean, keep vendor types at infrastructure boundaries, run `npm run check`, commit only green changes, and never force-push.
+
+### DeepL-first mode (local implementation)
+
+The Wrangler default is `TRANSLATION_PROVIDER=deepl`. Configure the Secret
+name `DEEPL_API_KEY` through the existing approved setup process; no value is
+included here. Sensitive/ambiguous messages go directly to Gemini when
+`GEMINI_ESCALATION_ENABLED=true`, using its existing model, key and budgets.
+Clear Japanese uses DeepL PT-BR; Latin-only input is accepted only when DeepL
+auto-detects PT. There is no fallback after a provider call. See
+[DeepL-first routing](docs/architecture.md#deepl-first-routing) for the exact gate.
+
+Rollback: select `workers-ai` (the `AI` binding and `WORKERS_AI_MODEL` remain).
+Legacy: select `openai` with its existing model/key configuration. Changing the
+local default does not deploy or change external services.

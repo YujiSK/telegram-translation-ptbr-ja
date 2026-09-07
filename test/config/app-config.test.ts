@@ -432,3 +432,42 @@ describe("validateAppConfig — MAX_TRANSLATABLE_MESSAGE_LENGTH", () => {
     expect(result.ok).toBe(false);
   });
 });
+
+describe("DeepL configuration", () => {
+  const input = {
+    ...validWorkersAiInputWithGeminiEnabled,
+    TRANSLATION_PROVIDER: "deepl",
+    WORKERS_AI_MODEL: undefined,
+    OPENAI_MODEL: undefined,
+  };
+  it("needs neither rollback model nor secrets in non-secret config", () => {
+    expect(validateAppConfig(input)).toMatchObject({
+      ok: true,
+      value: {
+        translationProvider: "deepl",
+        geminiEscalationEnabled: true,
+        maxGeminiAttemptsPerMinute: 12,
+        maxGeminiAttemptsPerDay: 450,
+      },
+    });
+  });
+  it.each([
+    "GEMINI_MODEL",
+    "MAX_GEMINI_ATTEMPTS_PER_MINUTE",
+    "MAX_GEMINI_ATTEMPTS_PER_DAY",
+    "GEMINI_ESCALATION_ENABLED",
+  ])("requires enabled Gemini configuration: %s", (key) => {
+    expect(validateAppConfig({ ...input, [key]: undefined }).ok).toBe(false);
+  });
+  it("allows disabling Gemini and ignores its model and budgets then", () => {
+    expect(
+      validateAppConfig({
+        ...input,
+        GEMINI_ESCALATION_ENABLED: "false",
+        GEMINI_MODEL: undefined,
+        MAX_GEMINI_ATTEMPTS_PER_MINUTE: undefined,
+        MAX_GEMINI_ATTEMPTS_PER_DAY: undefined,
+      }).ok,
+    ).toBe(true);
+  });
+});

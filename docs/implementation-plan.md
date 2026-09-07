@@ -9,7 +9,7 @@ AI routine path) is completed — implemented and tested locally/in CI
 only, not deployed. Phase 9.1B (Gemini semantic escalation) is
 completed — implemented and tested locally/in CI only, not deployed,
 and disabled by default (`GEMINI_ESCALATION_ENABLED=false`) even once a
-future deploy happens. DeepL is not started.** OpenAI
+future deploy happens. DeepL-first implementation is the current authorized Phase 9.1C slice; local verification is pending.** OpenAI
 translation local implementation: Completed. Structured Outputs mock
 tests: Completed. Telegram reply orchestration mock tests: Completed.
 Speaker Memory local schema: Completed. Memory repository: Completed.
@@ -832,3 +832,32 @@ separately-approved action.
 - **次フェーズへ進む前の停止点:** This is the last phase in this plan.
   Any work beyond pilot validation (broader rollout, new features) is a
   new planning cycle, not an automatic continuation.
+
+## Phase 9.1C — DeepL-first translation
+
+Current authorized scope: local implementation and mocked tests only. No external
+service changes, deployments, Secret registration, commits, or pushes.
+
+- Default `TRANSLATION_PROVIDER=deepl`; retain `workers-ai` rollback and `openai` legacy.
+- Deterministic infrastructure preflight selects DeepL OR existing Gemini, at most
+  one translation provider per message. No fallback after either provider attempt.
+- Clear Japanese goes to PT-BR; Latin-only input goes to JA with auto-detection,
+  accepted only for source PT. Other detected languages are skipped.
+- Mixed Japanese/Latin, applicable corrections, explicit tone/emoji preferences,
+  short Japanese (at most 12 letters/digits), and all Japanese reply messages go
+  directly to Gemini. Han-only, other scripts and nonlinguistic input also go to
+  Gemini conservatively. Observed style alone does not force Gemini.
+- Reuse Gemini's existing switch and minute/day attempt budgets. No D1 migration.
+- DeepL v2, header authentication, fixed Free/Pro hosts, five-second timeout,
+  one attempt, strict response validation, no text/body/key logging or storage.
+- Completion requires `npm run format`, `npm run check`, and `git diff --check`.
+  Stop at local verification; deployment remains separately authorized work.
+
+Local verification status: implementation and mock tests added. Formatting,
+lint and typechecking pass. The focused Node-thread unit suite passes; the
+required Workers-runtime suite remains unverified because this Windows sandbox
+rejects esbuild/workerd child-process pipes with `spawn EPERM`. Phase completion
+is pending a successful `npm run check` in an environment that can start the
+Workers test runtime. Wrangler-generated environment declarations were refreshed
+with `--include-runtime=false`; the prior generated runtime section was retained
+because full runtime regeneration hits the same process restriction.

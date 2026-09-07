@@ -1,53 +1,29 @@
+import { selectDeepLRoute } from "../deepl/gate";
 import type { TranslateBoundary } from "../../application/translate-and-reply";
 import type { TranslationOutcome, TranslationRequest } from "../../domain/translation";
 import { ConfigurationError, EscalationRequiredError } from "../../shared/errors";
 import type { TranslationProvider } from "./provider";
 
 /**
- * Phase 9.1A: routes the single translation-path call to exactly one
- * provider, chosen once per request by non-secret config
- * (`TRANSLATION_PROVIDER`) — never by runtime fan-out or automatic
- * fallback. Satisfies the existing `application/translate-and-reply.ts`
- * `TranslateBoundary` contract unchanged, so `application/` and
- * `domain/` stay completely unaware that more than one provider exists.
- *
- * Phase 9.1B adds one bounded exception: when `workers-ai` mode's
- * provider returns `needsEscalation: true` AND the router was actually
- * configured with a `gemini` boundary (i.e. Gemini semantic escalation
- * is enabled — see src/handlers/telegram-webhook.ts, "Phase 9.1B:
- * Gemini escalation wiring"), the router calls Gemini exactly once, with
- * the *original* `TranslationRequest` — never Workers AI's provisional
- * outcome, translated text, or free-form reasoning (Gemini forms an
- * independent second opinion, not a refinement of a low-confidence
- * first attempt). If `gemini` is not configured (escalation disabled, or
- * before Phase 9.1B), behavior is unchanged from Phase 9.1A: an
- * `EscalationRequiredError` instead. This is the only place either
- * distinction is made — "is Gemini configured" fully answers "is
- * escalation enabled", so this module never reads config directly.
- *
- * Bounded fan-out invariant (docs/decisions/0002-multi-provider-translation-routing.md,
- * "Bounded fan-out policy"; docs/phase9-provider-plan.md, "Phase 9.1B"):
- * for `workers-ai` mode, at most 2 logical providers are ever called per
- * message — Workers AI alone, or Workers AI then Gemini. Forbidden by
- * design, unconditionally: a Workers AI transient/permanent/malformed
- * failure never reaches Gemini or OpenAI (the failing `provider.translate`
- * call throws before `needsEscalation` is ever read); a Gemini
- * transient/permanent/malformed failure never falls through to OpenAI;
- * `openai` mode never calls Workers AI or Gemini. Each mode calls at
- * most its own bounded provider set, at most once each, every time.
+ * Infrastructure-only provider selection; domain/application see one outcome.
+ * DeepL mode preflights the original request and calls at most one provider:
+ * DeepL OR Gemini. No result or failure can trigger another provider call.
+ * Workers AI rollback retains semantic escalation to Gemini (at most two).
+ * OpenAI legacy remains isolated. Every attempt uses the original request.
  */
 
-export type TranslationRouterMode = "workers-ai" | "openai";
+export type TranslationRouterMode = "deepl" | "workers-ai" | "openai";
 
 /** Phase 9.1B: which provider actually produced the final outcome — a safe fixed enum for logging only, never attached to `TranslationOutcome` itself (docs/phase9-provider-plan.md, "Provider metadata"). */
-export type TranslationRouterFinalProvider = "workers-ai" | "openai" | "gemini";
+export type TranslationRouterFinalProvider = "deepl" | "workers-ai" | "openai" | "gemini";
 
 export interface TranslationRouterOptions {
   readonly mode: TranslationRouterMode;
+  readonly deepl?: TranslationProvider;
   /** Required when mode === "workers-ai"; never called when mode === "openai". */
   readonly workersAi?: TranslationProvider;
   /**
-   * Phase 9.1B: the semantic escalation provider, called only when
+   * Phase 9.1B: the semantic escalation provider, called when the DeepL preflight selects Gemini or
    * `workersAi`'s candidate has `needsEscalation: true`. Leave undefined
    * to keep Phase 9.1A behavior (`needsEscalation: true` throws
    * `EscalationRequiredError`) — this is how "Gemini escalation
@@ -58,7 +34,7 @@ export interface TranslationRouterOptions {
   /**
    * Reserves one unit of the Gemini attempt budget immediately before
    * the single Gemini HTTP attempt — called only when `gemini` is
-   * configured and Workers AI actually requested escalation. May reject
+   * configured and the selected route needs Gemini. May reject
    * (typically with `RateLimitExceededError`/`UsageLimitExceededError` —
    * see `src/shared/errors.ts`); that rejection propagates immediately
    * and Gemini is never called, mirroring
@@ -105,6 +81,23 @@ async function translateViaWorkersAi(
 export function createTranslationRouter(options: TranslationRouterOptions): TranslateBoundary {
   return {
     async translate(request: TranslationRequest): Promise<TranslationOutcome> {
+      if (options.mode === "deepl") {
+        const route = selectDeepLRoute(request);
+        if (route.provider === "gemini") {
+          if (options.gemini === undefined) throw new EscalationRequiredError(route.reason);
+          await options.beforeGeminiAttempt?.();
+          const outcome = await options.gemini.translate(request);
+          options.onFinalProviderSelected?.("gemini");
+          return outcome;
+        }
+        if (options.deepl === undefined) throw new ConfigurationError("DeepL provider is missing");
+        const candidate = await options.deepl.translate(request);
+        // Never escalate after calling DeepL, even if an adapter requests it.
+        if (candidate.needsEscalation)
+          throw new EscalationRequiredError(candidate.escalationReason);
+        options.onFinalProviderSelected?.("deepl");
+        return candidate.outcome;
+      }
       if (options.mode === "workers-ai") {
         if (options.workersAi === undefined) {
           throw new ConfigurationError(
