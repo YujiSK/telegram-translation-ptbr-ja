@@ -268,6 +268,20 @@ describe("DeepL webhook", () => {
       expect(await count("provider_usage_counters")).toBe(0);
     },
   );
+  it.each(["12345", "www.google.com"])(
+    "skips non-translatable input before any external provider: %s",
+    async (text) => {
+      const calls = mockProviders();
+      const response = await deliver(text);
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        outcome: "ignored:untargeted-language",
+      });
+      expect(calls).not.toHaveBeenCalled();
+      expect(await recorded()).toBe(true);
+      expect(await count("provider_usage_counters")).toBe(0);
+    },
+  );
   it("skips non-PT Latin without Telegram or Gemini", async () => {
     const calls = mockProviders(200, "EN");
     const response = await deliver("Hello world");

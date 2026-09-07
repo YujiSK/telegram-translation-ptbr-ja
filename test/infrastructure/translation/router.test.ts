@@ -570,6 +570,27 @@ describe("DeepL-first exclusive routing", () => {
     expect(s.openai.translate).not.toHaveBeenCalled();
     expect(s.selected).toHaveBeenCalledWith("deepl");
   });
+  it.each(["12345", "www.google.com"])(
+    "skips non-translatable input without calling any provider: %s",
+    async (sourceText) => {
+      const s = setup();
+      const outcome = await createTranslationRouter(s.options).translate({
+        ...REQUEST,
+        sourceText,
+      });
+      expect(outcome).toEqual({
+        kind: "skipped",
+        detectedLanguage: "other",
+        reason: "untargeted-language",
+      });
+      expect(s.deepl.translate).not.toHaveBeenCalled();
+      expect(s.gemini.translate).not.toHaveBeenCalled();
+      expect(s.workersAi.translate).not.toHaveBeenCalled();
+      expect(s.openai.translate).not.toHaveBeenCalled();
+      expect(s.budget).not.toHaveBeenCalled();
+      expect(s.selected).not.toHaveBeenCalled();
+    },
+  );
   it("calls Gemini directly with original context after reserving budget", async () => {
     const s = setup();
     s.budget.mockImplementation(() => {

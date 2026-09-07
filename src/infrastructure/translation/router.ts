@@ -90,6 +90,9 @@ export function createTranslationRouter(options: TranslationRouterOptions): Tran
           options.onFinalProviderSelected?.("gemini");
           return outcome;
         }
+        if (route.provider === "skip") {
+          return { kind: "skipped", detectedLanguage: "other", reason: "untargeted-language" };
+        }
         if (options.deepl === undefined) throw new ConfigurationError("DeepL provider is missing");
         const candidate = await options.deepl.translate(request);
         // Never escalate after calling DeepL, even if an adapter requests it.

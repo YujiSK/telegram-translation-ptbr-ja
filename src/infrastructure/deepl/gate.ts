@@ -3,7 +3,8 @@ import type { EscalationReason } from "../../shared/errors";
 
 export type DeepLRoute =
   | { readonly provider: "deepl"; readonly targetLanguage: "PT-BR" | "JA" }
-  | { readonly provider: "gemini"; readonly reason: EscalationReason };
+  | { readonly provider: "gemini"; readonly reason: EscalationReason }
+  | { readonly provider: "skip" };
 
 const SHORT_JA_CONTEXT_SENSITIVE = new Set([
   "\u3046\u3093",
@@ -22,6 +23,7 @@ const SHORT_JA_CONTEXT_SENSITIVE = new Set([
   "\u306a\u3093\u3067",
   "\u3069\u3046\u3044\u3046\u3053\u3068",
   "\u3069\u3046\u306a\u3063\u3066\u3093\u3060",
+  "\u306a\u3093\u3058\u3083\u305d\u308a\u3083",
 ]);
 
 function stripChatPunctuation(text: string): string {
@@ -54,6 +56,10 @@ export function selectDeepLRoute(request: TranslationRequest): DeepLRoute {
   }
 
   const normalized = sourceText.normalize("NFC").trim();
+  if (/^(?:https?:\/\/|www\.)\S+$/iu.test(normalized) || !/\p{L}/u.test(normalized)) {
+    return { provider: "skip" };
+  }
+
   const letters = [...normalized].filter((c) => /\p{L}/u.test(c));
   const hasJapanese = letters.some((c) =>
     /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(c),

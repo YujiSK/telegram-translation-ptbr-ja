@@ -23,7 +23,12 @@ export class DeepLTranslationProvider implements TranslationProvider {
 
   async translate(request: TranslationRequest): Promise<ProviderTranslationCandidate> {
     const route = selectDeepLRoute(request);
-    if (route.provider !== "deepl") throw new EscalationRequiredError(route.reason);
+    if (route.provider === "gemini") throw new EscalationRequiredError(route.reason);
+    if (route.provider === "skip") {
+      throw new ConfigurationError(
+        "DeepL provider received a request that should have been skipped",
+      );
+    }
     const apiKey = this.options.apiKey;
     if (apiKey === undefined || apiKey.trim() === "") {
       throw new ConfigurationError(

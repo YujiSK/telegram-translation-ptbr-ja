@@ -27,10 +27,20 @@ describe("DeepL deterministic preflight", () => {
       });
     },
   );
-  it.each(["うん", "中文消息", "Привет", "안녕하세요", "123 😊", "", "Olá 世界"])(
-    "routes ambiguity directly to Gemini: %s",
+  it.each([
+    "\u3046\u3093",
+    "\u306a\u3093\u3058\u3083\u305d\u308a\u3083",
+    "\u4e2d\u6587\u6d88\u606f",
+    "\u041f\u0440\u0438\u0432\u0435\u0442",
+    "\uc548\ub155\ud558\uc138\uc694",
+    "Ol\u00e1 \u4e16\u754c",
+  ])("routes ambiguity directly to Gemini: %s", (sourceText) => {
+    expect(selectDeepLRoute({ ...request, sourceText }).provider).toBe("gemini");
+  });
+  it.each(["12345", "123 \ud83d\ude0a", "", "!!!", "www.google.com", "https://example.com/path"])(
+    "skips non-translatable input before any provider: %s",
     (sourceText) => {
-      expect(selectDeepLRoute({ ...request, sourceText }).provider).toBe("gemini");
+      expect(selectDeepLRoute({ ...request, sourceText })).toEqual({ provider: "skip" });
     },
   );
   it.each([
