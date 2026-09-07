@@ -52,8 +52,11 @@ export type GeminiInteractionStatusForLog =
   | "unrecognized";
 
 /** Optional safe diagnostic metadata an upstream call can attach to its own failure — never response content, never a Secret. See docs/security-and-privacy.md, "Log minimization". */
+export type UpstreamNetworkErrorKind = "abort" | "type-error" | "other";
+
 export interface UpstreamServiceErrorOptions {
   readonly stage?: UpstreamDiagnosticStage;
+  readonly networkErrorKind?: UpstreamNetworkErrorKind;
   readonly httpStatus?: number;
   readonly interactionStatus?: GeminiInteractionStatusForLog;
 }
@@ -126,6 +129,7 @@ export abstract class UpstreamServiceError extends AppError {
   readonly stage: UpstreamDiagnosticStage | undefined;
   readonly httpStatus: number | undefined;
   readonly interactionStatus: GeminiInteractionStatusForLog | undefined;
+  readonly networkErrorKind: UpstreamNetworkErrorKind | undefined;
 
   protected constructor(
     publicMessage: string,
@@ -137,6 +141,7 @@ export abstract class UpstreamServiceError extends AppError {
     this.stage = options?.stage;
     this.httpStatus = options?.httpStatus;
     this.interactionStatus = options?.interactionStatus;
+    this.networkErrorKind = options?.networkErrorKind;
   }
 }
 

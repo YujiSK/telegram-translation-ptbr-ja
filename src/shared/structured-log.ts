@@ -2,6 +2,7 @@ import type {
   EscalationReason,
   GeminiInteractionStatusForLog,
   UpstreamDiagnosticStage,
+  UpstreamNetworkErrorKind,
   UpstreamService,
 } from "./errors";
 
@@ -50,6 +51,7 @@ export interface LogFields {
   readonly httpStatus?: number;
   /** Gemini's top-level interaction `status` — always one of the closed set in GeminiInteractionStatusForLog, never an arbitrary/unvalidated string. */
   readonly interactionStatus?: GeminiInteractionStatusForLog;
+  readonly networkErrorKind?: UpstreamNetworkErrorKind;
   /** A fixed literal identifying which API version path was called (e.g. "v1") — never a full URL. */
   readonly endpointVersion?: string;
   /** The configured, non-secret provider model id (e.g. GEMINI_MODEL's value) — never a model-generated string. */
@@ -124,6 +126,7 @@ export function classifyError(error: unknown): {
   stage?: UpstreamDiagnosticStage;
   httpStatus?: number;
   interactionStatus?: GeminiInteractionStatusForLog;
+  networkErrorKind?: UpstreamNetworkErrorKind;
 } {
   if (!(error instanceof Error)) {
     return { errorClass: "UnknownError" };
@@ -140,11 +143,19 @@ export function classifyError(error: unknown): {
     "interactionStatus" in error && isGeminiInteractionStatusForLog(error.interactionStatus)
       ? error.interactionStatus
       : undefined;
+  const networkErrorKind =
+    "networkErrorKind" in error &&
+    (error.networkErrorKind === "abort" ||
+      error.networkErrorKind === "type-error" ||
+      error.networkErrorKind === "other")
+      ? error.networkErrorKind
+      : undefined;
   return {
     errorClass: error.name,
     service,
     ...(stage !== undefined ? { stage } : {}),
     ...(httpStatus !== undefined ? { httpStatus } : {}),
     ...(interactionStatus !== undefined ? { interactionStatus } : {}),
+    ...(networkErrorKind !== undefined ? { networkErrorKind } : {}),
   };
 }

@@ -30,8 +30,17 @@ export async function callDeepLTranslate(
       }),
       signal,
     });
-  } catch {
-    throw new TransientUpstreamError("DeepL request failed", "deepl", { stage: "request" });
+  } catch (error) {
+    const networkErrorKind =
+      error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")
+        ? "abort"
+        : error instanceof TypeError
+          ? "type-error"
+          : "other";
+    throw new TransientUpstreamError("DeepL request failed", "deepl", {
+      stage: "request",
+      networkErrorKind,
+    });
   }
   if (!response.ok) {
     const ErrorType =
