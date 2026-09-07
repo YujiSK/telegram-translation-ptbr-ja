@@ -30,7 +30,7 @@ describe("DeepL client", () => {
         `https://${host}/v2/translate`,
         expect.objectContaining({
           method: "POST",
-          redirect: "error",
+          redirect: "manual",
           headers: {
             "content-type": "application/json",
             Authorization: `DeepL-Auth-Key ${apiKey}`,

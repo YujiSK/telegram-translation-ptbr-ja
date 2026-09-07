@@ -18,7 +18,7 @@ export async function callDeepLTranslate(
   try {
     response = await (options.fetchFn ?? fetch)(`https://${host}/v2/translate`, {
       method: "POST",
-      redirect: "error",
+      redirect: "manual",
       headers: {
         "content-type": "application/json",
         Authorization: `DeepL-Auth-Key ${options.apiKey}`,
