@@ -527,7 +527,7 @@ describe("POST /telegram/webhook — successful translation and reply", () => {
     const body: unknown = JSON.parse(requireStringBody(call[1]?.body));
     expect(body).toMatchObject({
       chat_id: CHAT_ID,
-      text: "mensagem sintética de teste",
+      text: "🇧🇷 mensagem sintética de teste",
       reply_parameters: { message_id: MESSAGE_ID },
     });
   });

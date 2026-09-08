@@ -66,7 +66,7 @@ describe("translateAndReply — translated outcome", () => {
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage).toHaveBeenCalledWith({
       chatId: baseMessage.chatId,
-      text: "mensagem sintética de teste",
+      text: "🇧🇷 mensagem sintética de teste",
       replyToMessageId: baseMessage.messageId,
     });
   });
@@ -89,7 +89,7 @@ describe("translateAndReply — translated outcome", () => {
 
     expect(outcome.kind).toBe("translated");
     expect(sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ text: "合成テストメッセージ" }),
+      expect.objectContaining({ text: "🇯🇵 合成テストメッセージ" }),
     );
   });
 

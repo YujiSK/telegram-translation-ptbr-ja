@@ -118,7 +118,7 @@ export async function translateAndReply(
 
   const sentMessage = await boundaries.reply.sendMessage({
     chatId: message.chatId,
-    text: outcome.translatedText,
+    text: `${outcome.targetLanguage === "ja" ? "🇯🇵" : "🇧🇷"} ${outcome.translatedText}`,
     replyToMessageId: message.messageId,
   });
 
